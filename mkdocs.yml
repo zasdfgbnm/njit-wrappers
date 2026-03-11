@@ -1,0 +1,8 @@
+site_name: njit-wrappers
+site_url: https://zasdfgbnm.github.io/njit-wrappers/
+repo_url: https://github.com/zasdfgbnm/njit-wrappers
+
+theme:
+  name: material
+
+docs_dir: docs

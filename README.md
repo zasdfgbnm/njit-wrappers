@@ -1,20 +1,8 @@
 # njit-wrappers
 
-Use `torch.Tensor` directly inside `@numba.njit` functions.
+`torch.Tensor` support inside `@numba.njit`.
 
-```python
-import numba
-import torch
-import njit_wrappers  # one import, that's it
-
-@numba.njit
-def add(a, b):
-    return a + b
-
-a = torch.ones(1024)
-b = torch.ones(1024)
-c = add(a, b)   # calls at::add under the hood, no Python overhead
-```
+**User documentation:** https://zasdfgbnm.github.io/njit-wrappers/
 
 ## How it works
 

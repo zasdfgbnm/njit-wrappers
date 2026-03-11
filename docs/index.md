@@ -103,27 +103,36 @@ out = mlp_forward(x, w1, b1, w2, b2)
 
 ## How it works
 
-### No hard-coded mangled C++ names
+### No hard-coded mangled C++ names, no wrapper call overhead
 
-Earlier approaches to calling ATen from LLVM IR required embedding
-mangled C++ symbol names such as
-`_ZN2at4_ops10add_Tensor4callERKNS_6TensorES4_RKN3c106ScalarE`
-directly in Python source.  This is brittle: symbol names depend on the
-C++ ABI, compiler flags, and PyTorch version.
+Naïve approaches either hard-code the mangled C++ symbol name
+(`_ZN2at4_ops10add_Tensor4call…`) in Python source — brittle across
+PyTorch versions — or introduce a C wrapper function that the JIT code
+calls instead of ATen directly, adding an extra call per tensor op.
 
-`njit-wrappers` instead compiles a thin C extension (`_bridge.so`) that
-exposes every supported op as a plain C function with a stable, readable
-name:
+`njit-wrappers` does neither.  `_bridge.so` exposes a tiny **address
+getter** per op:
 
+```cpp
+// Called ONCE at Python import time, never again.
+extern "C" int64_t njit_addr_relu() {
+    return (int64_t)(void*)&at::_ops::relu::call;
+}
 ```
-int64_t njit_aten_add(int64_t self, int64_t other);
-int64_t njit_aten_relu(int64_t self);
-// …one per op
+
+At import time, Python calls each getter, receives the real ATen
+function address, and registers it with LLVM under a short stable name:
+
+```python
+addr = _bridge_lib.njit_addr_relu()      # resolve once
+llvm.add_symbol("_aten_relu", addr)      # LLVM sees the real address
 ```
 
-The generated LLVM IR calls these C identifiers directly.  All C++
-dispatch machinery stays inside the compiled extension — the Python
-layer never sees a mangled name.
+JIT-compiled LLVM IR then calls `_aten_relu` directly.  That name
+resolves to `at::_ops::relu::call` — the real ATen dispatch entry — with
+**zero extra function calls** at runtime.  The C++ compiler in the
+build step handles all name mangling; the Python layer never touches a
+mangled name.
 
 ### Tensor representation
 
@@ -134,9 +143,11 @@ Inside compiled functions, a `torch.Tensor` is represented as an
   the `TensorImpl` refcount.
 - **Boxing** (compiled → Python): `njit_wrap_impl()` steals the owned
   reference into a fresh `torch.Tensor`.
-- **ATen ops**: each wrapper bumps the result refcount once and returns
-  the raw pointer; the result is therefore automatically owned by the
-  caller.
+- **ATen ops**: LLVM IR spills each `int64` handle onto an 8-byte stack
+  slot and passes its address as `const at::Tensor&` (valid because
+  `sizeof(at::Tensor) == 8` and the only field is the `TensorImpl*`).
+  The result is returned via the sret convention and read back as an
+  `int64` owned reference.
 
 ### Known limitation
 

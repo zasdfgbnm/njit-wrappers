@@ -1,39 +1,56 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
-#include <ATen/ATen.h>
+
+// Per-op dispatch-table headers expose at::_ops::{name}::call (the real ATen
+// dispatch entry points).  The C++ compiler resolves their mangled names at
+// build time; Python only ever sees the stable C getter names below.
+#include <ATen/ops/abs.h>
+#include <ATen/ops/add.h>
+#include <ATen/ops/cos.h>
+#include <ATen/ops/div.h>
+#include <ATen/ops/eq.h>
+#include <ATen/ops/exp.h>
+#include <ATen/ops/ge.h>
+#include <ATen/ops/gt.h>
+#include <ATen/ops/le.h>
+#include <ATen/ops/log.h>
+#include <ATen/ops/lt.h>
+#include <ATen/ops/matmul.h>
+#include <ATen/ops/mean.h>
+#include <ATen/ops/mm.h>
+#include <ATen/ops/mul.h>
+#include <ATen/ops/ne.h>
+#include <ATen/ops/neg.h>
+#include <ATen/ops/pow.h>
+#include <ATen/ops/relu.h>
+#include <ATen/ops/sigmoid.h>
+#include <ATen/ops/silu.h>
+#include <ATen/ops/sin.h>
+#include <ATen/ops/sqrt.h>
+#include <ATen/ops/sub.h>
+#include <ATen/ops/sum.h>
+#include <ATen/ops/tan.h>
+#include <ATen/ops/tanh.h>
+
 #include <c10/core/TensorImpl.h>
 #include <c10/util/intrusive_ptr.h>
 #include <torch/csrc/autograd/python_variable.h>
 
-// ---------------------------------------------------------------------------
-// Helpers: convert between int64_t (TensorImpl* with owned ref) and at::Tensor
-// ---------------------------------------------------------------------------
+// c10::optional<ScalarType> must be trivially copyable so that it is passed
+// by value (as a 16-bit integer) under the SysV x86-64 ABI.  The LLVM IR in
+// _tensor.py depends on this layout.
+static_assert(
+    std::is_trivially_copyable<c10::optional<c10::ScalarType>>::value,
+    "c10::optional<ScalarType> must be trivially copyable (i16 by-value ABI)");
+static_assert(
+    sizeof(c10::optional<c10::ScalarType>) == 2,
+    "c10::optional<ScalarType> must be exactly 2 bytes");
 
-// Borrow: reconstruct an at::Tensor from an owned int64 handle without
-// disturbing the caller's ownership.  The temporary incref is undone when
-// the returned Tensor is destroyed.
-static at::Tensor impl_to_tensor(int64_t impl_int) {
-    auto* impl = reinterpret_cast<c10::TensorImpl*>(impl_int);
-    c10::raw::intrusive_ptr::incref(impl);
-    return at::Tensor(
-        c10::intrusive_ptr<c10::TensorImpl, c10::UndefinedTensorImpl>
-            ::unsafe_steal_from_new(impl));
-}
-
-// Take ownership: convert a freshly-created result Tensor into an int64 handle
-// with an owned reference.  The extra incref lets the local Tensor destruct
-// without dropping the ref we return.
-static int64_t tensor_to_impl(at::Tensor t) {
-    c10::TensorImpl* impl = t.unsafeGetTensorImpl();
-    c10::raw::intrusive_ptr::incref(impl);
-    return reinterpret_cast<int64_t>(impl);
-}
+extern "C" {
 
 // ---------------------------------------------------------------------------
 // Reference management – called from compiled code via LLVM symbols
 // ---------------------------------------------------------------------------
-
-extern "C" {
 
 // Extract TensorImpl* from a Python torch.Tensor and increment its refcount.
 int64_t njit_extract_impl(PyObject* obj) {
@@ -59,67 +76,61 @@ PyObject* njit_wrap_impl(int64_t impl_int) {
 }
 
 // ---------------------------------------------------------------------------
-// ATen operation wrappers with stable C names (no C++ name mangling needed).
+// ATen address getters
 //
-// Each wrapper takes int64_t handles (owned TensorImpl* refs) and returns
-// a new int64_t handle for the result.  Calling code in _tensor.py only
-// needs to know these simple C identifiers – the C++ mangled symbols for
-// the underlying ATen dispatch entries are entirely hidden here.
+// Each function is called EXACTLY ONCE at Python import time to resolve the
+// real address of an ATen dispatch function.  That address is then registered
+// with LLVM under a stable name so that JIT-compiled code can call it
+// DIRECTLY – with zero extra indirection at tensor-operation time.
+//
+// Calling conventions (all return via sret because at::Tensor is non-trivially
+// copyable; actual ABI args follow the hidden sret pointer):
+//
+//   UNARY       void(Tensor* sret, const Tensor& self)
+//   BINARY      void(Tensor* sret, const Tensor& self, const Tensor& other)
+//   ALPHA       void(Tensor* sret, const Tensor& self, const Tensor& other,
+//                    const Scalar& alpha)
+//   REDUCTION   void(Tensor* sret, const Tensor& self,
+//                    optional<ScalarType> dtype)   ← passed as i16 by value
 // ---------------------------------------------------------------------------
 
-// Macro for binary tensor×tensor ops (self, other) -> result
-#define NJIT_BINARY_OP(name, expr)                                    \
-int64_t njit_aten_##name(int64_t self_int, int64_t other_int) {       \
-    at::Tensor self  = impl_to_tensor(self_int);                      \
-    at::Tensor other = impl_to_tensor(other_int);                     \
-    return tensor_to_impl(expr);                                      \
-}
+#define NJIT_ADDR_GETTER(cname, fn_expr) \
+    int64_t cname() { return (int64_t)(void*)(fn_expr); }
 
-// Macro for unary tensor -> result ops
-#define NJIT_UNARY_OP(name, expr)                                     \
-int64_t njit_aten_##name(int64_t self_int) {                          \
-    at::Tensor self = impl_to_tensor(self_int);                       \
-    return tensor_to_impl(expr);                                      \
-}
+// --- UNARY ---
+NJIT_ADDR_GETTER(njit_addr_neg,     &at::_ops::neg::call)
+NJIT_ADDR_GETTER(njit_addr_abs,     &at::_ops::abs::call)
+NJIT_ADDR_GETTER(njit_addr_exp,     &at::_ops::exp::call)
+NJIT_ADDR_GETTER(njit_addr_log,     &at::_ops::log::call)
+NJIT_ADDR_GETTER(njit_addr_sqrt,    &at::_ops::sqrt::call)
+NJIT_ADDR_GETTER(njit_addr_sin,     &at::_ops::sin::call)
+NJIT_ADDR_GETTER(njit_addr_cos,     &at::_ops::cos::call)
+NJIT_ADDR_GETTER(njit_addr_tan,     &at::_ops::tan::call)
+NJIT_ADDR_GETTER(njit_addr_relu,    &at::_ops::relu::call)
+NJIT_ADDR_GETTER(njit_addr_sigmoid, &at::_ops::sigmoid::call)
+NJIT_ADDR_GETTER(njit_addr_tanh,    &at::_ops::tanh::call)
+NJIT_ADDR_GETTER(njit_addr_silu,    &at::_ops::silu::call)
 
-// --- Element-wise arithmetic ---
-NJIT_BINARY_OP(add,    at::add(self, other))
-NJIT_BINARY_OP(sub,    at::sub(self, other))
-NJIT_BINARY_OP(mul,    at::mul(self, other))
-NJIT_BINARY_OP(div,    at::div(self, other))
-NJIT_BINARY_OP(pow,    at::pow(self, other))
+// --- REDUCTION (sret + Tensor + optional<ScalarType> as i16) ---
+NJIT_ADDR_GETTER(njit_addr_sum,     &at::_ops::sum::call)
+NJIT_ADDR_GETTER(njit_addr_mean,    &at::_ops::mean::call)
 
-// --- Linear algebra ---
-NJIT_BINARY_OP(matmul, at::matmul(self, other))
-NJIT_BINARY_OP(mm,     at::mm(self, other))
+// --- ALPHA (sret + Tensor + Tensor + Scalar) ---
+NJIT_ADDR_GETTER(njit_addr_add,     &at::_ops::add_Tensor::call)
+NJIT_ADDR_GETTER(njit_addr_sub,     &at::_ops::sub_Tensor::call)
 
-// --- Comparison (result is a bool tensor) ---
-NJIT_BINARY_OP(eq, at::eq(self, other))
-NJIT_BINARY_OP(ne, at::ne(self, other))
-NJIT_BINARY_OP(lt, at::lt(self, other))
-NJIT_BINARY_OP(le, at::le(self, other))
-NJIT_BINARY_OP(gt, at::gt(self, other))
-NJIT_BINARY_OP(ge, at::ge(self, other))
-
-// --- Unary element-wise math ---
-NJIT_UNARY_OP(neg,     at::neg(self))
-NJIT_UNARY_OP(abs,     at::abs(self))
-NJIT_UNARY_OP(exp,     at::exp(self))
-NJIT_UNARY_OP(log,     at::log(self))
-NJIT_UNARY_OP(sqrt,    at::sqrt(self))
-NJIT_UNARY_OP(sin,     at::sin(self))
-NJIT_UNARY_OP(cos,     at::cos(self))
-NJIT_UNARY_OP(tan,     at::tan(self))
-
-// --- Activations ---
-NJIT_UNARY_OP(relu,    at::relu(self))
-NJIT_UNARY_OP(sigmoid, at::sigmoid(self))
-NJIT_UNARY_OP(tanh,    at::tanh(self))
-NJIT_UNARY_OP(silu,    at::silu(self))
-
-// --- Reductions (returns a scalar-valued 0-dim tensor) ---
-NJIT_UNARY_OP(sum,  at::sum(self))
-NJIT_UNARY_OP(mean, at::mean(self))
+// --- BINARY (sret + Tensor + Tensor) ---
+NJIT_ADDR_GETTER(njit_addr_mul,     &at::_ops::mul_Tensor::call)
+NJIT_ADDR_GETTER(njit_addr_div,     &at::_ops::div_Tensor::call)
+NJIT_ADDR_GETTER(njit_addr_matmul,  &at::_ops::matmul::call)
+NJIT_ADDR_GETTER(njit_addr_mm,      &at::_ops::mm::call)
+NJIT_ADDR_GETTER(njit_addr_pow,     &at::_ops::pow_Tensor_Tensor::call)
+NJIT_ADDR_GETTER(njit_addr_eq,      &at::_ops::eq_Tensor::call)
+NJIT_ADDR_GETTER(njit_addr_ne,      &at::_ops::ne_Tensor::call)
+NJIT_ADDR_GETTER(njit_addr_lt,      &at::_ops::lt_Tensor::call)
+NJIT_ADDR_GETTER(njit_addr_le,      &at::_ops::le_Tensor::call)
+NJIT_ADDR_GETTER(njit_addr_gt,      &at::_ops::gt_Tensor::call)
+NJIT_ADDR_GETTER(njit_addr_ge,      &at::_ops::ge_Tensor::call)
 
 }  // extern "C"
 

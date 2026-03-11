@@ -34,6 +34,7 @@ where = ["src"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=6.0",
+    "pyright>=1.1",
     "ruff>=0.9",
     "mkdocs-material>=9.0",
 ]
@@ -56,6 +57,14 @@ ignore = []
 
 [tool.ruff.lint.isort]
 known-first-party = ["njit_wrappers"]
+
+# ── Pyright ───────────────────────────────────────────────────────────────────
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+include = ["src"]
+# _tensor.py uses numba internal APIs that ship no type stubs
+ignore = ["src/njit_wrappers/_tensor.py"]
 
 # ── Pytest ────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]

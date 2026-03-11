@@ -29,12 +29,12 @@ import ctypes
 import operator
 from pathlib import Path
 
+import llvmlite.binding as llvm
 import torch
 from llvmlite import ir
-import llvmlite.binding as llvm
-import numba
 from numba import types
 from numba.core import cgutils
+from numba.core.datamodel import models
 from numba.core.extending import (
     NativeValue,
     box,
@@ -44,12 +44,10 @@ from numba.core.extending import (
     typeof_impl,
     unbox,
 )
-from numba.core.datamodel import models
 
 # ---------------------------------------------------------------------------
 # Load the C bridge extension and register all needed symbols with LLVM JIT
 # ---------------------------------------------------------------------------
-
 import njit_wrappers._bridge as _bridge_module  # noqa: F401 – side-effect load
 
 _bridge_lib = ctypes.CDLL(_bridge_module.__file__)
@@ -63,25 +61,28 @@ _bridge_lib.njit_release_impl.argtypes = [ctypes.c_int64]
 _bridge_lib.njit_wrap_impl.restype = ctypes.py_object
 _bridge_lib.njit_wrap_impl.argtypes = [ctypes.c_int64]
 
+
 def _sym_addr(func) -> int:
-    return ctypes.cast(func, ctypes.c_void_p).value
+    addr = ctypes.cast(func, ctypes.c_void_p).value
+    assert addr is not None, f"could not resolve address for {func}"
+    return addr
+
 
 llvm.add_symbol("njit_extract_impl", _sym_addr(_bridge_lib.njit_extract_impl))
 llvm.add_symbol("njit_release_impl", _sym_addr(_bridge_lib.njit_release_impl))
-llvm.add_symbol("njit_wrap_impl",    _sym_addr(_bridge_lib.njit_wrap_impl))
+llvm.add_symbol("njit_wrap_impl", _sym_addr(_bridge_lib.njit_wrap_impl))
 
 # Register the ATen add symbol so the @intrinsic can reference it directly.
 _TORCH_LIB_PATH = Path(torch.__file__).parent / "lib" / "libtorch_cpu.so"
 _torch_lib = ctypes.CDLL(str(_TORCH_LIB_PATH))
 
-_ATEN_ADD_SYM = (
-    "_ZN2at4_ops10add_Tensor4callERKNS_6TensorES4_RKN3c106ScalarE"
-)
+_ATEN_ADD_SYM = "_ZN2at4_ops10add_Tensor4callERKNS_6TensorES4_RKN3c106ScalarE"
 llvm.add_symbol(_ATEN_ADD_SYM, _sym_addr(getattr(_torch_lib, _ATEN_ADD_SYM)))
 
 # ---------------------------------------------------------------------------
 # Numba type
 # ---------------------------------------------------------------------------
+
 
 class TensorType(types.Type):
     def __init__(self):
@@ -100,6 +101,7 @@ def typeof_tensor(val, c):
 # Data model: int64 holding TensorImpl* (owned ref)
 # ---------------------------------------------------------------------------
 
+
 @register_model(TensorType)
 class TensorModel(models.PrimitiveModel):
     def __init__(self, dmm, fe_type):
@@ -109,6 +111,7 @@ class TensorModel(models.PrimitiveModel):
 # ---------------------------------------------------------------------------
 # Unboxing: Python torch.Tensor -> int64 (TensorImpl*, owned ref)
 # ---------------------------------------------------------------------------
+
 
 @unbox(TensorType)
 def unbox_tensor(typ, obj, c):
@@ -136,6 +139,7 @@ def unbox_tensor(typ, obj, c):
 # ---------------------------------------------------------------------------
 # Boxing: int64 (TensorImpl*, owned ref) -> Python torch.Tensor
 # ---------------------------------------------------------------------------
+
 
 @box(TensorType)
 def box_tensor(typ, val, c):
@@ -166,6 +170,7 @@ def box_tensor(typ, val, c):
 #   [24]  int64  pad   = 0
 # ---------------------------------------------------------------------------
 
+
 @intrinsic
 def _tensor_add(typingctx, a, b):
     if not (isinstance(a, TensorType) and isinstance(b, TensorType)):
@@ -194,7 +199,7 @@ def _tensor_add(typingctx, a, b):
         # Construct c10::Scalar(1) on the stack
         alpha_slot = builder.alloca(scalar_ty, name="alpha")
         zero = ir.Constant(i64, 0)
-        one  = ir.Constant(i64, 1)
+        one = ir.Constant(i64, 1)
         for idx, val in enumerate([one, zero, one, zero]):
             ptr = builder.gep(
                 alpha_slot,
@@ -203,15 +208,16 @@ def _tensor_add(typingctx, a, b):
             builder.store(val, ptr)
 
         # Declare the ATen function (void-returning, sret convention)
-        fn_type = ir.FunctionType(void, [
-            ir.PointerType(i64),       # sret: at::Tensor*
-            ir.PointerType(i64),       # const at::Tensor& self
-            ir.PointerType(i64),       # const at::Tensor& other
-            ir.PointerType(scalar_ty), # const c10::Scalar& alpha
-        ])
-        add_fn = cgutils.get_or_insert_function(
-            builder.module, fn_type, _ATEN_ADD_SYM
+        fn_type = ir.FunctionType(
+            void,
+            [
+                ir.PointerType(i64),  # sret: at::Tensor*
+                ir.PointerType(i64),  # const at::Tensor& self
+                ir.PointerType(i64),  # const at::Tensor& other
+                ir.PointerType(scalar_ty),  # const c10::Scalar& alpha
+            ],
         )
+        add_fn = cgutils.get_or_insert_function(builder.module, fn_type, _ATEN_ADD_SYM)
         add_fn.args[0].attributes.add("sret")
 
         builder.call(add_fn, [sret, self_slot, other_slot, alpha_slot])
@@ -225,9 +231,12 @@ def _tensor_add(typingctx, a, b):
 # Operator overloading
 # ---------------------------------------------------------------------------
 
+
 @overload(operator.add)
 def overload_tensor_add(a, b):
     if isinstance(a, TensorType) and isinstance(b, TensorType):
+
         def impl(a, b):
-            return _tensor_add(a, b)
+            return _tensor_add(a, b)  # type: ignore[call-arg]
+
         return impl

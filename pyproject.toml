@@ -1,13 +1,13 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68", "torch"]
+build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "njit-wrappers"
 version = "0.1.0"
-description = "Hello world Python package"
+description = "torch.Tensor support inside numba.njit"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "njit-wrappers contributors" }]
 keywords = []
@@ -16,30 +16,30 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.14",
 ]
-dependencies = []
+dependencies = [
+    "torch",
+    "numba",
+]
 
 [project.urls]
 Homepage = "https://github.com/zasdfgbnm/njit-wrappers"
 Repository = "https://github.com/zasdfgbnm/njit-wrappers"
 Issues = "https://github.com/zasdfgbnm/njit-wrappers/issues"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=6.0",
-    "pyright>=1.1",
     "ruff>=0.9",
 ]
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/njit_wrappers"]
 
 # ── Ruff ──────────────────────────────────────────────────────────────────────
 [tool.ruff]
 line-length = 88
-target-version = "py314"
 
 [tool.ruff.lint]
 select = [
@@ -55,12 +55,6 @@ ignore = []
 
 [tool.ruff.lint.isort]
 known-first-party = ["njit_wrappers"]
-
-# ── Pyright ───────────────────────────────────────────────────────────────────
-[tool.pyright]
-pythonVersion = "3.14"
-typeCheckingMode = "strict"
-include = ["src"]
 
 # ── Pytest ────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]

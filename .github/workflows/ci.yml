@@ -26,9 +26,6 @@ jobs:
       - name: Build C++ extension
         run: python setup.py build_ext --inplace
 
-      - name: Install package (editable)
-        run: pip install -e . --no-build-isolation
-
       - name: Lint (ruff)
         run: ruff check .
 

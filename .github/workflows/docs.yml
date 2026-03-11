@@ -26,9 +26,6 @@ jobs:
       - name: Build C++ extension
         run: python setup.py build_ext --inplace
 
-      - name: Install package
-        run: pip install -e . --no-build-isolation
-
       - name: Build docs
         run: mkdocs build --strict
 

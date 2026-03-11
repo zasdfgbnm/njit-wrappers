@@ -2,19 +2,22 @@
 
 Importing this module registers torch.Tensor as a Numba type so that
 @numba.njit functions can accept and return tensors.  Operations inside
-the compiled function lower **directly** to ATen dispatch functions with
-no extra wrapper call at runtime.
+the compiled function lower **directly** to ATen functions with no extra
+wrapper call at runtime.
 
-How symbol resolution works (no hard-coded mangled C++ names)
---------------------------------------------------------------
-1. At Python import time we call small C getter functions in _bridge.so,
-   e.g. ``njit_addr_relu()``.  Each getter returns the address of the
-   real ATen dispatch entry, e.g. ``at::_ops::relu::call``.  The C++
-   compiler resolved the C++ mangled name when building _bridge.so.
-2. We register each address with LLVM under a short, stable name
-   (``_aten_relu``, …) via ``llvm.add_symbol()``.
-3. JIT-compiled LLVM IR calls ``_aten_relu`` directly, which IS the ATen
-   function.  No extra indirection at tensor-operation time.
+How symbol resolution works
+---------------------------
+ATen functions exported by libtorch_cpu.so use Itanium C++ name mangling.
+We compute the mangled name in Python using the regular structure of ATen
+function signatures (all in namespace ``at``, arguments drawn from a small
+set of types), then look up the address via ctypes and register it with
+LLVM.  No hard-coded mangled strings in the source, no C++ address-getter
+helper functions.
+
+Example for ``at::relu(const at::Tensor&)``:
+
+    _mangle_aten("relu", _ARGS_UNARY)
+    → "_ZN2at4reluERKNS_6TensorE"
 
 ATen calling conventions (SysV x86-64, all ops return at::Tensor via sret)
 ---------------------------------------------------------------------------
@@ -24,7 +27,7 @@ ATen calling conventions (SysV x86-64, all ops return at::Tensor via sret)
                   const Scalar& alpha)          ← add, sub
   REDUCTION  void(Tensor* sret, const Tensor& self,
                   optional<ScalarType> dtype)   ← i16 by value (trivially
-                                                  copyable 2-byte type)
+                                                  copyable 2-byte struct)
 
 Tensor representation inside compiled functions
 -----------------------------------------------
@@ -42,6 +45,7 @@ returned will leak their TensorImpl refcount.
 
 import ctypes
 import operator
+from pathlib import Path
 
 import llvmlite.binding as llvm
 import torch
@@ -64,7 +68,7 @@ import njit_wrappers._bridge as _bridge_module  # noqa: F401 – side-effect loa
 _bridge_lib = ctypes.CDLL(_bridge_module.__file__)
 
 # ---------------------------------------------------------------------------
-# Reference-management symbols (always needed)
+# Reference-management symbols (bridge extension)
 # ---------------------------------------------------------------------------
 
 _bridge_lib.njit_extract_impl.restype = ctypes.c_int64
@@ -75,65 +79,96 @@ _bridge_lib.njit_wrap_impl.restype = ctypes.py_object
 _bridge_lib.njit_wrap_impl.argtypes = [ctypes.c_int64]
 
 
-def _sym_addr(func) -> int:
-    addr = ctypes.cast(func, ctypes.c_void_p).value
-    assert addr is not None
+def _fn_addr(lib: ctypes.CDLL, mangled: str) -> int:
+    fn = getattr(lib, mangled)
+    addr = ctypes.cast(fn, ctypes.c_void_p).value
+    assert addr, f"symbol not found: {mangled}"
     return addr
 
 
-llvm.add_symbol("njit_extract_impl", _sym_addr(_bridge_lib.njit_extract_impl))
-llvm.add_symbol("njit_release_impl", _sym_addr(_bridge_lib.njit_release_impl))
-llvm.add_symbol("njit_wrap_impl", _sym_addr(_bridge_lib.njit_wrap_impl))
+llvm.add_symbol("njit_extract_impl", _fn_addr(_bridge_lib, "njit_extract_impl"))
+llvm.add_symbol("njit_release_impl", _fn_addr(_bridge_lib, "njit_release_impl"))
+llvm.add_symbol("njit_wrap_impl",    _fn_addr(_bridge_lib, "njit_wrap_impl"))
 
 # ---------------------------------------------------------------------------
-# Resolve real ATen dispatch addresses once at import time.
+# ATen symbol resolution via Itanium C++ name mangling computed in Python.
 #
-# The getter functions in _bridge.so were compiled against the ATen headers;
-# the C++ compiler resolved the mangled names.  We just call the getter once
-# and hand the resulting address to LLVM.  After this point, every occurrence
-# of "_aten_relu" etc. in JIT-compiled IR calls the ATen function directly.
+# All supported ops are free functions in namespace ``at``.  Their Itanium
+# mangled names follow the pattern:
+#
+#   _ZN  2at  {len(name)}{name}  E  {arg_suffix}
+#    ^    ^                       ^
+#    |   namespace "at"           end of nested name
+#    mangled prefix
+#
+# Substitution context after encoding "N 2at {n}{name} E":
+#   S_  = at::              (the namespace)
+# After encoding the first "const at::Tensor &" (RKNS_6TensorE):
+#   S0_ = at::Tensor        (class type)
+#   S1_ = const at::Tensor  (cv-qualified)
+#   S2_ = const at::Tensor& (reference)
+#
+# For reduction ops the second argument is
+#   c10::optional<c10::ScalarType>
+# In modern PyTorch c10::optional = std::optional (using-declaration), so
+# it mangles as St8optional (St = std::).  ScalarType lives in c10::,
+# giving N3c1010ScalarTypeE.  The full by-value argument suffix is
+#   St8optionalIN3c1010ScalarTypeEE
+# _bridge.cpp has a static_assert that this type is trivially copyable and
+# 2 bytes, which is why the LLVM IR passes it as i16.
 # ---------------------------------------------------------------------------
 
-# (op_suffix, llvm_sym,       calling_convention)
-_ATEN_OPS: list[tuple[str, str, str]] = [
-    # --- UNARY: void(sret Tensor*, const Tensor&) ---
-    ("neg",     "_aten_neg",     "unary"),
-    ("abs",     "_aten_abs",     "unary"),
-    ("exp",     "_aten_exp",     "unary"),
-    ("log",     "_aten_log",     "unary"),
-    ("sqrt",    "_aten_sqrt",    "unary"),
-    ("sin",     "_aten_sin",     "unary"),
-    ("cos",     "_aten_cos",     "unary"),
-    ("tan",     "_aten_tan",     "unary"),
-    ("relu",    "_aten_relu",    "unary"),
-    ("sigmoid", "_aten_sigmoid", "unary"),
-    ("tanh",    "_aten_tanh",    "unary"),
-    ("silu",    "_aten_silu",    "unary"),
-    # --- REDUCTION: void(sret Tensor*, const Tensor&, i16 dtype) ---
-    ("sum",     "_aten_sum",     "reduction"),
-    ("mean",    "_aten_mean",    "reduction"),
-    # --- ALPHA: void(sret Tensor*, const Tensor&, const Tensor&, const Scalar&) ---
-    ("add",     "_aten_add",     "alpha"),
-    ("sub",     "_aten_sub",     "alpha"),
-    # --- BINARY: void(sret Tensor*, const Tensor&, const Tensor&) ---
-    ("mul",     "_aten_mul",     "binary"),
-    ("div",     "_aten_div",     "binary"),
-    ("matmul",  "_aten_matmul",  "binary"),
-    ("mm",      "_aten_mm",      "binary"),
-    ("pow",     "_aten_pow",     "binary"),
-    ("eq",      "_aten_eq",      "binary"),
-    ("ne",      "_aten_ne",      "binary"),
-    ("lt",      "_aten_lt",      "binary"),
-    ("le",      "_aten_le",      "binary"),
-    ("gt",      "_aten_gt",      "binary"),
-    ("ge",      "_aten_ge",      "binary"),
+_TORCH_LIB = ctypes.CDLL(str(Path(torch.__file__).parent / "lib" / "libtorch_cpu.so"))
+
+# Argument suffix constants (substitutions as annotated above)
+_ARGS_UNARY  = "RKNS_6TensorE"                             # (const Tensor&)
+_ARGS_BINARY = "RKNS_6TensorES2_"                          # (const Tensor&, const Tensor&)
+_ARGS_ALPHA  = "RKNS_6TensorES2_RKN3c106ScalarE"           # (…, const Scalar&)
+_ARGS_REDUCE = "RKNS_6TensorESt8optionalIN3c1010ScalarTypeEE"  # (…, optional<ScalarType>)
+
+
+def _mangle_aten(name: str, arg_suffix: str) -> str:
+    """Compute the Itanium mangled name for at::{name}({arg_suffix})."""
+    return f"_ZN2at{len(name)}{name}E{arg_suffix}"
+
+
+# (func_name, arg_suffix, llvm_sym, calling_convention)
+_ATEN_OPS: list[tuple[str, str, str, str]] = [
+    # UNARY:     void(sret Tensor*, const Tensor&)
+    ("neg",     _ARGS_UNARY,   "_aten_neg",     "unary"),
+    ("abs",     _ARGS_UNARY,   "_aten_abs",     "unary"),
+    ("exp",     _ARGS_UNARY,   "_aten_exp",     "unary"),
+    ("log",     _ARGS_UNARY,   "_aten_log",     "unary"),
+    ("sqrt",    _ARGS_UNARY,   "_aten_sqrt",    "unary"),
+    ("sin",     _ARGS_UNARY,   "_aten_sin",     "unary"),
+    ("cos",     _ARGS_UNARY,   "_aten_cos",     "unary"),
+    ("tan",     _ARGS_UNARY,   "_aten_tan",     "unary"),
+    ("relu",    _ARGS_UNARY,   "_aten_relu",    "unary"),
+    ("sigmoid", _ARGS_UNARY,   "_aten_sigmoid", "unary"),
+    ("tanh",    _ARGS_UNARY,   "_aten_tanh",    "unary"),
+    ("silu",    _ARGS_UNARY,   "_aten_silu",    "unary"),
+    # REDUCTION: void(sret Tensor*, const Tensor&, i16 optional<ScalarType>)
+    ("sum",     _ARGS_REDUCE,  "_aten_sum",     "reduction"),
+    ("mean",    _ARGS_REDUCE,  "_aten_mean",    "reduction"),
+    # ALPHA:     void(sret Tensor*, const Tensor&, const Tensor&, const Scalar&)
+    ("add",     _ARGS_ALPHA,   "_aten_add",     "alpha"),
+    ("sub",     _ARGS_ALPHA,   "_aten_sub",     "alpha"),
+    # BINARY:    void(sret Tensor*, const Tensor&, const Tensor&)
+    ("mul",     _ARGS_BINARY,  "_aten_mul",     "binary"),
+    ("div",     _ARGS_BINARY,  "_aten_div",     "binary"),
+    ("matmul",  _ARGS_BINARY,  "_aten_matmul",  "binary"),
+    ("mm",      _ARGS_BINARY,  "_aten_mm",      "binary"),
+    ("pow",     _ARGS_BINARY,  "_aten_pow",     "binary"),
+    ("eq",      _ARGS_BINARY,  "_aten_eq",      "binary"),
+    ("ne",      _ARGS_BINARY,  "_aten_ne",      "binary"),
+    ("lt",      _ARGS_BINARY,  "_aten_lt",      "binary"),
+    ("le",      _ARGS_BINARY,  "_aten_le",      "binary"),
+    ("gt",      _ARGS_BINARY,  "_aten_gt",      "binary"),
+    ("ge",      _ARGS_BINARY,  "_aten_ge",      "binary"),
 ]
 
-for _op, _llvm_sym, _cc in _ATEN_OPS:
-    _getter = getattr(_bridge_lib, f"njit_addr_{_op}")
-    _getter.restype = ctypes.c_int64
-    _getter.argtypes = []
-    llvm.add_symbol(_llvm_sym, _getter())
+for _name, _args, _llvm_sym, _cc in _ATEN_OPS:
+    llvm.add_symbol(_llvm_sym, _fn_addr(_TORCH_LIB, _mangle_aten(_name, _args)))
 
 # ---------------------------------------------------------------------------
 # Numba type system

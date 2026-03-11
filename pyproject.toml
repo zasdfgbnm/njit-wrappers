@@ -31,7 +31,7 @@ Issues = "https://github.com/zasdfgbnm/njit-wrappers/issues"
 dev = [
     "pytest>=8.0",
     "pytest-cov>=6.0",
-    "mypy>=1.0",
+    "pyright>=1.1",
     "ruff>=0.9",
 ]
 
@@ -58,12 +58,11 @@ ignore = []
 [tool.ruff.lint.isort]
 known-first-party = ["njit_wrappers"]
 
-# ── Mypy ──────────────────────────────────────────────────────────────────────
-[tool.mypy]
-python_version = "3.11"
-strict = true
-warn_return_any = true
-warn_unused_configs = true
+# ── Pyright ───────────────────────────────────────────────────────────────────
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+include = ["src"]
 
 # ── Pytest ────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]

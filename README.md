@@ -9,7 +9,7 @@ A hello world Python package using modern tooling.
 | [uv](https://docs.astral.sh/uv/) | Package manager & virtual env |
 | [hatchling](https://hatch.pypa.io/) | Build backend |
 | [ruff](https://docs.astral.sh/ruff/) | Linter & formatter |
-| [mypy](https://mypy-lang.org/) | Static type checker |
+| [pyright](https://github.com/microsoft/pyright) | Static type checker |
 | [pytest](https://pytest.org/) | Test framework |
 
 ## Setup
@@ -52,7 +52,7 @@ uv run ruff check --fix .
 uv run ruff format .
 
 # Type check
-uv run mypy src/
+uv run pyright src/
 ```
 
 ## Project Structure

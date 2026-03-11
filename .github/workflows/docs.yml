@@ -1,15 +1,49 @@
-name: Deploy docs
+name: Docs
 
 on:
   push:
     branches: [main, master]
-
-permissions:
-  contents: write
+  pull_request:
 
 jobs:
-  deploy:
+  build-and-test:
+    name: Build docs & run examples
     runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install torch and numba
+        run: pip install torch numba --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install doc and test dependencies
+        run: pip install mkdocs-material pytest pytest-markdown-docs
+
+      - name: Build C++ extension
+        run: python setup.py build_ext --inplace
+
+      - name: Install package
+        run: pip install -e . --no-build-isolation
+
+      - name: Build docs
+        run: mkdocs build --strict
+
+      - name: Run code examples in docs
+        run: PYTHONPATH=src pytest --markdown-docs docs/
+
+  deploy:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push'
+
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
 

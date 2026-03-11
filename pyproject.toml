@@ -34,6 +34,7 @@ where = ["src"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=6.0",
+    "pytest-markdown-docs>=0.5",
     "pyright>=1.1",
     "ruff>=0.9",
     "mkdocs-material>=9.0",

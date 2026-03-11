@@ -18,7 +18,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install torch and numba
-        run: pip install torch numba --index-url https://download.pytorch.org/whl/cpu
+        run: pip install torch --extra-index-url https://download.pytorch.org/whl/cpu && pip install numba
 
       - name: Install dev dependencies
         run: pip install pytest pytest-cov pyright ruff

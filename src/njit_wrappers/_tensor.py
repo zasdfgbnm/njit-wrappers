@@ -2,8 +2,8 @@
 
 Importing this module registers torch.Tensor as a Numba type so that
 @numba.njit functions can accept and return tensors.  Operations on
-tensors inside the compiled function lower directly to the corresponding
-ATen C++ symbols – no extra Python-level wrapper calls.
+tensors inside the compiled function lower directly to ATen C++ functions
+via stable C-named wrappers – no hard-coded C++ mangled names anywhere.
 
 Lifetime model
 --------------
@@ -15,8 +15,9 @@ Internally a tensor is represented as an int64 holding a TensorImpl*
               the value is no longer needed.
 - Boxing    : njit_wrap_impl() steals the owned reference into a fresh
               Python torch.Tensor object.
-- ATen ops  : called via direct LLVM symbol references (zero wrapper
-              overhead).  The result's refcount starts at 1 (owned).
+- ATen ops  : called through njit_aten_<name>() C wrappers compiled into
+              the _bridge extension.  Symbol names are plain C identifiers,
+              so there is nothing to mangle or hard-code.
 
 Known limitation
 ----------------
@@ -27,7 +28,6 @@ This will be addressed in a future iteration.
 
 import ctypes
 import operator
-from pathlib import Path
 
 import llvmlite.binding as llvm
 import torch
@@ -72,12 +72,38 @@ llvm.add_symbol("njit_extract_impl", _sym_addr(_bridge_lib.njit_extract_impl))
 llvm.add_symbol("njit_release_impl", _sym_addr(_bridge_lib.njit_release_impl))
 llvm.add_symbol("njit_wrap_impl", _sym_addr(_bridge_lib.njit_wrap_impl))
 
-# Register the ATen add symbol so the @intrinsic can reference it directly.
-_TORCH_LIB_PATH = Path(torch.__file__).parent / "lib" / "libtorch_cpu.so"
-_torch_lib = ctypes.CDLL(str(_TORCH_LIB_PATH))
+# ---------------------------------------------------------------------------
+# Register ATen wrapper symbols (stable C names – no C++ mangling required).
+#
+# The _bridge extension exports njit_aten_<name>(i64[, i64]) -> i64 for every
+# supported operation.  We look up each symbol's address once at import time
+# and register it with LLVM so generated IR can reference it directly.
+# ---------------------------------------------------------------------------
 
-_ATEN_ADD_SYM = "_ZN2at4_ops10add_Tensor4callERKNS_6TensorES4_RKN3c106ScalarE"
-llvm.add_symbol(_ATEN_ADD_SYM, _sym_addr(getattr(_torch_lib, _ATEN_ADD_SYM)))
+_BINARY_OPS: list[str] = [
+    "add", "sub", "mul", "div", "pow",
+    "matmul", "mm",
+    "eq", "ne", "lt", "le", "gt", "ge",
+]
+_UNARY_OPS: list[str] = [
+    "neg", "abs", "exp", "log", "sqrt", "sin", "cos", "tan",
+    "relu", "sigmoid", "tanh", "silu",
+    "sum", "mean",
+]
+
+for _op in _BINARY_OPS:
+    _sym = f"njit_aten_{_op}"
+    _fn = getattr(_bridge_lib, _sym)
+    _fn.restype = ctypes.c_int64
+    _fn.argtypes = [ctypes.c_int64, ctypes.c_int64]
+    llvm.add_symbol(_sym, _sym_addr(_fn))
+
+for _op in _UNARY_OPS:
+    _sym = f"njit_aten_{_op}"
+    _fn = getattr(_bridge_lib, _sym)
+    _fn.restype = ctypes.c_int64
+    _fn.argtypes = [ctypes.c_int64]
+    llvm.add_symbol(_sym, _sym_addr(_fn))
 
 # ---------------------------------------------------------------------------
 # Numba type
@@ -155,80 +181,92 @@ def box_tensor(typ, val, c):
 
 
 # ---------------------------------------------------------------------------
-# @intrinsic: direct zero-overhead call to at::_ops::add_Tensor::call
+# Intrinsic factories
 #
-# Calling convention (x86-64 System V / Itanium C++ ABI):
-#   rdi = sret pointer  (caller-allocated 8-byte slot for the returned Tensor)
-#   rsi = &self         (const at::Tensor& — pointer to 8-byte slot)
-#   rdx = &other        (const at::Tensor& — pointer to 8-byte slot)
-#   rcx = &alpha        (const c10::Scalar& — pointer to 32-byte slot)
-#
-# c10::Scalar(1) layout (32 bytes):
-#   [0 ]  int64  value = 1      (union field .i)
-#   [8 ]  int64  unused = 0     (upper half of the 16-byte union)
-#   [16]  int64  tag   = 1      (Tag::HAS_i)
-#   [24]  int64  pad   = 0
+# Rather than copy-pasting one @intrinsic per operation, these factories
+# capture the symbol name in a closure.  The generated LLVM IR is a simple
+# i64 -> i64 (unary) or (i64, i64) -> i64 (binary) call – far simpler than
+# the original sret / c10::Scalar boilerplate that was needed when calling
+# C++ ATen symbols directly.
 # ---------------------------------------------------------------------------
 
 
-@intrinsic
-def _tensor_add(typingctx, a, b):
-    if not (isinstance(a, TensorType) and isinstance(b, TensorType)):
-        return None
+def _make_binary_intrinsic(sym_name: str):
+    """Return a Numba @intrinsic that calls njit_aten_<op>(i64, i64) -> i64."""
 
-    sig = tensor_type(tensor_type, tensor_type)
+    @intrinsic
+    def _op(typingctx, a, b):
+        if not (isinstance(a, TensorType) and isinstance(b, TensorType)):
+            return None
+        sig = tensor_type(tensor_type, tensor_type)
 
-    def codegen(context, builder, signature, args):
-        i64 = ir.IntType(64)
-        i32 = ir.IntType(32)
-        void = ir.VoidType()
-        scalar_ty = ir.ArrayType(i64, 4)  # 32 bytes
+        def codegen(context, builder, signature, args):
+            i64 = ir.IntType(64)
+            fn_type = ir.FunctionType(i64, [i64, i64])
+            fn = cgutils.get_or_insert_function(builder.module, fn_type, sym_name)
+            return builder.call(fn, args)
 
-        a_val, b_val = args
+        return sig, codegen
 
-        # Allocate output slot (sret)
-        sret = builder.alloca(i64, name="sret")
+    return _op
 
-        # Allocate and populate at::Tensor slots for the two inputs
-        self_slot = builder.alloca(i64, name="self_slot")
-        builder.store(a_val, self_slot)
 
-        other_slot = builder.alloca(i64, name="other_slot")
-        builder.store(b_val, other_slot)
+def _make_unary_intrinsic(sym_name: str):
+    """Return a Numba @intrinsic that calls njit_aten_<op>(i64) -> i64."""
 
-        # Construct c10::Scalar(1) on the stack
-        alpha_slot = builder.alloca(scalar_ty, name="alpha")
-        zero = ir.Constant(i64, 0)
-        one = ir.Constant(i64, 1)
-        for idx, val in enumerate([one, zero, one, zero]):
-            ptr = builder.gep(
-                alpha_slot,
-                [ir.Constant(i32, 0), ir.Constant(i32, idx)],
-            )
-            builder.store(val, ptr)
+    @intrinsic
+    def _op(typingctx, a):
+        if not isinstance(a, TensorType):
+            return None
+        sig = tensor_type(tensor_type)
 
-        # Declare the ATen function (void-returning, sret convention)
-        fn_type = ir.FunctionType(
-            void,
-            [
-                ir.PointerType(i64),  # sret: at::Tensor*
-                ir.PointerType(i64),  # const at::Tensor& self
-                ir.PointerType(i64),  # const at::Tensor& other
-                ir.PointerType(scalar_ty),  # const c10::Scalar& alpha
-            ],
-        )
-        add_fn = cgutils.get_or_insert_function(builder.module, fn_type, _ATEN_ADD_SYM)
-        add_fn.args[0].attributes.add("sret")
+        def codegen(context, builder, signature, args):
+            i64 = ir.IntType(64)
+            fn_type = ir.FunctionType(i64, [i64])
+            fn = cgutils.get_or_insert_function(builder.module, fn_type, sym_name)
+            return builder.call(fn, args)
 
-        builder.call(add_fn, [sret, self_slot, other_slot, alpha_slot])
+        return sig, codegen
 
-        return builder.load(sret)
-
-    return sig, codegen
+    return _op
 
 
 # ---------------------------------------------------------------------------
-# Operator overloading
+# Intrinsic instances (one per ATen op)
+# ---------------------------------------------------------------------------
+
+_tensor_add = _make_binary_intrinsic("njit_aten_add")
+_tensor_sub = _make_binary_intrinsic("njit_aten_sub")
+_tensor_mul = _make_binary_intrinsic("njit_aten_mul")
+_tensor_div = _make_binary_intrinsic("njit_aten_div")
+_tensor_pow = _make_binary_intrinsic("njit_aten_pow")
+_tensor_matmul = _make_binary_intrinsic("njit_aten_matmul")
+_tensor_mm = _make_binary_intrinsic("njit_aten_mm")
+
+_tensor_eq = _make_binary_intrinsic("njit_aten_eq")
+_tensor_ne = _make_binary_intrinsic("njit_aten_ne")
+_tensor_lt = _make_binary_intrinsic("njit_aten_lt")
+_tensor_le = _make_binary_intrinsic("njit_aten_le")
+_tensor_gt = _make_binary_intrinsic("njit_aten_gt")
+_tensor_ge = _make_binary_intrinsic("njit_aten_ge")
+
+_tensor_neg = _make_unary_intrinsic("njit_aten_neg")
+_tensor_abs = _make_unary_intrinsic("njit_aten_abs")
+_tensor_exp = _make_unary_intrinsic("njit_aten_exp")
+_tensor_log = _make_unary_intrinsic("njit_aten_log")
+_tensor_sqrt = _make_unary_intrinsic("njit_aten_sqrt")
+_tensor_sin = _make_unary_intrinsic("njit_aten_sin")
+_tensor_cos = _make_unary_intrinsic("njit_aten_cos")
+_tensor_tan = _make_unary_intrinsic("njit_aten_tan")
+_tensor_relu = _make_unary_intrinsic("njit_aten_relu")
+_tensor_sigmoid = _make_unary_intrinsic("njit_aten_sigmoid")
+_tensor_tanh = _make_unary_intrinsic("njit_aten_tanh")
+_tensor_silu = _make_unary_intrinsic("njit_aten_silu")
+_tensor_sum = _make_unary_intrinsic("njit_aten_sum")
+_tensor_mean = _make_unary_intrinsic("njit_aten_mean")
+
+# ---------------------------------------------------------------------------
+# Operator overloads (Python operators -> intrinsics)
 # ---------------------------------------------------------------------------
 
 
@@ -238,5 +276,270 @@ def overload_tensor_add(a, b):
 
         def impl(a, b):
             return _tensor_add(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.sub)
+def overload_tensor_sub(a, b):
+    if isinstance(a, TensorType) and isinstance(b, TensorType):
+
+        def impl(a, b):
+            return _tensor_sub(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.mul)
+def overload_tensor_mul(a, b):
+    if isinstance(a, TensorType) and isinstance(b, TensorType):
+
+        def impl(a, b):
+            return _tensor_mul(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.truediv)
+def overload_tensor_div(a, b):
+    if isinstance(a, TensorType) and isinstance(b, TensorType):
+
+        def impl(a, b):
+            return _tensor_div(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.pow)
+def overload_tensor_pow(a, b):
+    if isinstance(a, TensorType) and isinstance(b, TensorType):
+
+        def impl(a, b):
+            return _tensor_pow(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.matmul)
+def overload_tensor_matmul(a, b):
+    if isinstance(a, TensorType) and isinstance(b, TensorType):
+
+        def impl(a, b):
+            return _tensor_matmul(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.neg)
+def overload_tensor_neg(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_neg(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(abs)
+def overload_tensor_abs(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_abs(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.eq)
+def overload_tensor_eq(a, b):
+    if isinstance(a, TensorType) and isinstance(b, TensorType):
+
+        def impl(a, b):
+            return _tensor_eq(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.ne)
+def overload_tensor_ne(a, b):
+    if isinstance(a, TensorType) and isinstance(b, TensorType):
+
+        def impl(a, b):
+            return _tensor_ne(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.lt)
+def overload_tensor_lt(a, b):
+    if isinstance(a, TensorType) and isinstance(b, TensorType):
+
+        def impl(a, b):
+            return _tensor_lt(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.le)
+def overload_tensor_le(a, b):
+    if isinstance(a, TensorType) and isinstance(b, TensorType):
+
+        def impl(a, b):
+            return _tensor_le(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.gt)
+def overload_tensor_gt(a, b):
+    if isinstance(a, TensorType) and isinstance(b, TensorType):
+
+        def impl(a, b):
+            return _tensor_gt(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(operator.ge)
+def overload_tensor_ge(a, b):
+    if isinstance(a, TensorType) and isinstance(b, TensorType):
+
+        def impl(a, b):
+            return _tensor_ge(a, b)  # type: ignore[call-arg]
+
+        return impl
+
+
+# ---------------------------------------------------------------------------
+# torch.* function overloads
+# ---------------------------------------------------------------------------
+
+
+@overload(torch.exp)
+def overload_torch_exp(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_exp(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.log)
+def overload_torch_log(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_log(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.sqrt)
+def overload_torch_sqrt(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_sqrt(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.sin)
+def overload_torch_sin(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_sin(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.cos)
+def overload_torch_cos(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_cos(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.tan)
+def overload_torch_tan(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_tan(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.abs)
+def overload_torch_abs(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_abs(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.relu)
+def overload_torch_relu(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_relu(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.sigmoid)
+def overload_torch_sigmoid(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_sigmoid(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.tanh)
+def overload_torch_tanh(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_tanh(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.nn.functional.silu)
+def overload_torch_silu(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_silu(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.sum)
+def overload_torch_sum(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_sum(a)  # type: ignore[call-arg]
+
+        return impl
+
+
+@overload(torch.mean)
+def overload_torch_mean(a):
+    if isinstance(a, TensorType):
+
+        def impl(a):
+            return _tensor_mean(a)  # type: ignore[call-arg]
 
         return impl

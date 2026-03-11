@@ -1,6 +1,5 @@
-"""njit-wrappers: Hello world Python package."""
+"""njit-wrappers: torch.Tensor support inside numba.njit."""
 
-from njit_wrappers.hello import greet
+import njit_wrappers._tensor  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
-__all__ = ["greet"]
 __version__ = "0.1.0"

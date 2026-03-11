@@ -7,34 +7,36 @@ on:
 
 jobs:
   ci:
-    name: ubuntu / py3.14
+    name: ubuntu / py3.11
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
         with:
-          enable-cache: true
+          python-version: "3.11"
 
-      - name: Set up Python 3.14
-        run: uv python install 3.14
+      - name: Install torch and numba
+        run: pip install torch --extra-index-url https://download.pytorch.org/whl/cpu && pip install numba
 
-      - name: Install dependencies
-        run: uv sync --python 3.14
+      - name: Install dev dependencies
+        run: pip install pytest pytest-cov pyright ruff
+
+      - name: Build C++ extension
+        run: python setup.py build_ext --inplace
 
       - name: Lint (ruff)
-        run: uv run ruff check .
+        run: ruff check .
 
       - name: Format check (ruff)
-        run: uv run ruff format --check .
+        run: ruff format --check .
 
       - name: Type check (pyright)
-        run: uv run pyright src/
+        run: PYTHONPATH=src pyright src/
 
       - name: Test (pytest)
-        run: uv run pytest --cov --cov-report=xml
+        run: PYTHONPATH=src pytest --cov --cov-report=xml
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5

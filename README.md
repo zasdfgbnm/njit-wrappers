@@ -1,71 +1,84 @@
 # njit-wrappers
 
-A hello world Python package using modern tooling.
+Use `torch.Tensor` directly inside `@numba.njit` functions.
+
+```python
+import numba
+import torch
+import njit_wrappers  # one import, that's it
+
+@numba.njit
+def add(a, b):
+    return a + b
+
+a = torch.ones(1024)
+b = torch.ones(1024)
+c = add(a, b)   # calls at::add under the hood, no Python overhead
+```
+
+## How it works
+
+- `import njit_wrappers` registers `torch.Tensor` as a Numba type.
+- Inside a compiled function, tensor operations lower directly to ATen
+  C++ symbols — no intermediate Python calls, no wrapper overhead.
+- Boxing/unboxing (converting between Python tensors and the compiled
+  representation) happens only at the function boundary.
+
+## Installation
+
+```bash
+# Install PyTorch first (see https://pytorch.org/get-started)
+pip install torch
+
+# Build and install njit-wrappers
+pip install .
+```
+
+The package contains a C++ extension that is compiled against your
+installed PyTorch during `pip install`.
 
 ## Toolchain
 
 | Tool | Purpose |
 |------|---------|
-| [uv](https://docs.astral.sh/uv/) | Package manager & virtual env |
-| [hatchling](https://hatch.pypa.io/) | Build backend |
+| [setuptools](https://setuptools.pypa.io/) + [torch.utils.cpp_extension](https://pytorch.org/docs/stable/cpp_extension.html) | Build backend (C++ extension) |
 | [ruff](https://docs.astral.sh/ruff/) | Linter & formatter |
-| [pyright](https://github.com/microsoft/pyright) | Static type checker |
 | [pytest](https://pytest.org/) | Test framework |
-
-## Setup
-
-```bash
-# Install uv (if not already installed)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install dependencies
-uv sync
-
-# Activate the virtual environment (optional, uv run handles this)
-source .venv/bin/activate
-```
-
-## Usage
-
-```python
-from njit_wrappers import greet
-
-print(greet())          # Hello, World!
-print(greet("Python"))  # Hello, Python!
-```
 
 ## Development
 
 ```bash
-# Run tests
-uv run pytest
+# Build the C++ extension in-place
+python setup.py build_ext --inplace
 
-# Run tests with coverage
-uv run pytest --cov
+# Run tests
+PYTHONPATH=src pytest
 
 # Lint & format check
-uv run ruff check .
-uv run ruff format --check .
-
-# Auto-fix lint issues and format
-uv run ruff check --fix .
-uv run ruff format .
-
-# Type check
-uv run pyright src/
+ruff check .
+ruff format --check .
 ```
 
 ## Project Structure
 
 ```
 njit-wrappers/
-├── pyproject.toml          # Project config & tool settings
+├── setup.py                    # C++ extension build
+├── pyproject.toml              # project metadata & tool config
 ├── src/
 │   └── njit_wrappers/
-│       ├── __init__.py
-│       └── hello.py
-├── tests/
-│   ├── __init__.py
-│   └── test_hello.py
-└── README.md
+│       ├── __init__.py         # registers TensorType on import
+│       ├── _tensor.py          # Numba type, box/unbox, @intrinsic, overloads
+│       └── csrc/
+│           └── _bridge.cpp     # C++: extract/release/wrap TensorImpl*
+└── tests/
+    └── test_tensor.py
 ```
+
+## Known limitations
+
+- Intermediate tensors created inside an njit function (i.e. results of
+  ops that are not the final return value) currently leak their
+  refcount.  Functions with a single operation are unaffected.
+- Only `operator.add` (`+`) is implemented so far.  More ops will be
+  added incrementally.

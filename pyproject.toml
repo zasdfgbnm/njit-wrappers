@@ -7,7 +7,7 @@ name = "njit-wrappers"
 version = "0.1.0"
 description = "Hello world Python package"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 license = { text = "MIT" }
 authors = [{ name = "njit-wrappers contributors" }]
 keywords = []
@@ -16,9 +16,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = []
 
@@ -41,7 +39,7 @@ packages = ["src/njit_wrappers"]
 # ── Ruff ──────────────────────────────────────────────────────────────────────
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = [
@@ -60,7 +58,7 @@ known-first-party = ["njit_wrappers"]
 
 # ── Pyright ───────────────────────────────────────────────────────────────────
 [tool.pyright]
-pythonVersion = "3.11"
+pythonVersion = "3.14"
 typeCheckingMode = "strict"
 include = ["src"]
 

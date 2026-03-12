@@ -23,6 +23,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numba  # noqa: E402
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 import njit_wrappers  # noqa: F401, E402 – registers TensorType
@@ -36,7 +37,8 @@ OUT_DIR = Path(__file__).resolve().parent
 # so we generate a dedicated function for each op count.
 # ---------------------------------------------------------------------------
 
-OP_COUNTS = [1, 2, 4, 8, 16, 32, 64]
+MIN_OPS = 1
+MAX_OPS = 64
 
 
 def _make_graph(n_ops):
@@ -120,7 +122,7 @@ def main():
     times_njit = []
     times_eager = []
 
-    for n_ops in OP_COUNTS:
+    for n_ops in range(MIN_OPS, MAX_OPS + 1):
         graph_fn = _make_graph(n_ops)
         graph_fn_njit = numba.njit(graph_fn)
         # Trigger njit compilation (not timed)
@@ -133,29 +135,57 @@ def main():
         times_njit.append(t_njit)
         times_eager.append(t_eager)
 
+        print(f"  ops={n_ops:3d}  njit={t_njit:8.2f} µs  eager={t_eager:8.2f} µs")
+
+    # -- Linear fits: y = k*x + b --
+    xs = np.array(op_counts, dtype=np.float64)
+    ys_njit = np.array(times_njit, dtype=np.float64)
+    ys_eager = np.array(times_eager, dtype=np.float64)
+
+    k_njit, b_njit = np.polyfit(xs, ys_njit, 1)
+    k_eager, b_eager = np.polyfit(xs, ys_eager, 1)
+
+    print("\nLinear fit  y = k*x + b")
+    print(f"  njit:   k = {k_njit:.4f} µs/op,  b = {b_njit:.4f} µs")
+    print(f"  eager:  k = {k_eager:.4f} µs/op,  b = {b_eager:.4f} µs")
+
     # -- Console table --
-    print(f"CPU overhead on CUDA tiny tensors (4×4), {ITERS} iterations\n")
-    print(f"{'Ops':>4}  {'njit (µs)':>10}  {'eager (µs)':>11}  {'ratio':>6}")
-    print(f"{'----':>4}  {'----------':>10}  {'-----------':>11}  {'------':>6}")
+    print(f"\nCPU overhead on CUDA tiny tensors (4×4), {ITERS} iterations\n")
+    print(f"{'Ops':>4}  {'njit (µs)':>10}  {'eager (µs)':>11}")
+    print(f"{'----':>4}  {'----------':>10}  {'-----------':>11}")
     for i, n_ops in enumerate(op_counts):
-        ratio = times_eager[i] / times_njit[i]
-        print(
-            f"{n_ops:4d}  {times_njit[i]:10.2f}  {times_eager[i]:11.2f}  {ratio:6.2f}×"
-        )
+        print(f"{n_ops:4d}  {times_njit[i]:10.2f}  {times_eager[i]:11.2f}")
 
     # -- Plot --
     plot_name = "overhead_vs_ops.png"
     plot_path = OUT_DIR / plot_name
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(op_counts, times_eager, "o-", label="eager", linewidth=2, markersize=6)
-    ax.plot(op_counts, times_njit, "s-", label="njit", linewidth=2, markersize=6)
+    fit_xs = np.linspace(MIN_OPS, MAX_OPS, 200)
+    fit_njit = k_njit * fit_xs + b_njit
+    fit_eager = k_eager * fit_xs + b_eager
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.scatter(op_counts, times_eager, s=12, alpha=0.5, label="eager (data)")
+    ax.scatter(op_counts, times_njit, s=12, alpha=0.5, label="njit (data)")
+    ax.plot(
+        fit_xs,
+        fit_eager,
+        "-",
+        linewidth=2,
+        label=f"eager fit: y = {k_eager:.2f}x + {b_eager:.2f}",
+    )
+    ax.plot(
+        fit_xs,
+        fit_njit,
+        "-",
+        linewidth=2,
+        label=f"njit fit: y = {k_njit:.2f}x + {b_njit:.2f}",
+    )
     ax.set_xlabel("Number of ops")
     ax.set_ylabel("Overhead (µs/call)")
     ax.set_title("CPU Dispatch Overhead: njit vs Eager PyTorch")
     ax.legend()
     ax.grid(True, alpha=0.3)
-    ax.set_xticks(op_counts)
 
     fig.savefig(str(plot_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -167,9 +197,8 @@ def main():
 
     md_table_rows = []
     for i, n_ops in enumerate(op_counts):
-        ratio = times_eager[i] / times_njit[i]
         md_table_rows.append(
-            f"| {n_ops} | {times_njit[i]:.2f} | {times_eager[i]:.2f} | {ratio:.2f}× |"
+            f"| {n_ops} | {times_njit[i]:.2f} | {times_eager[i]:.2f} |"
         )
     md_table = "\n".join(md_table_rows)
 
@@ -188,8 +217,25 @@ Each graph is simply `for i in range(N): x = torch.relu(x)`.
 
 ![overhead_vs_ops]({plot_name})
 
-| Ops | njit (µs) | eager (µs) | ratio |
-|-----|-----------|------------|-------|
+### Linear fit: `y = k * x + b`
+
+|       | k (µs/op) | b (µs)  |
+|-------|-----------|---------|
+| njit  | {k_njit:.4f}    | {b_njit:.4f}  |
+| eager | {k_eager:.4f}    | {b_eager:.4f}  |
+
+- **k** (slope) is the **per-op cost** — the marginal time (in µs) added by
+  each additional `torch.relu` call.  A smaller *k* means each op dispatches
+  faster.
+- **b** (intercept) is the **fixed overhead** — the baseline time (in µs) for
+  entering and leaving the function, independent of how many ops it contains.
+  This captures things like the Python → njit transition cost or the eager
+  Python function-call overhead.
+
+### Raw data
+
+| Ops | njit (µs) | eager (µs) |
+|-----|-----------|------------|
 {md_table}
 
 > {ITERS} iterations per data point, {WARMUP} warmup iterations.

@@ -88,83 +88,83 @@ def _fn_addr(lib: ctypes.CDLL, mangled: str) -> int:
 
 llvm.add_symbol("njit_extract_impl", _fn_addr(_bridge_lib, "njit_extract_impl"))
 llvm.add_symbol("njit_release_impl", _fn_addr(_bridge_lib, "njit_release_impl"))
-llvm.add_symbol("njit_wrap_impl",    _fn_addr(_bridge_lib, "njit_wrap_impl"))
+llvm.add_symbol("njit_wrap_impl", _fn_addr(_bridge_lib, "njit_wrap_impl"))
 
 # ---------------------------------------------------------------------------
 # ATen symbol resolution via Itanium C++ name mangling computed in Python.
 #
-# All supported ops are free functions in namespace ``at``.  Their Itanium
-# mangled names follow the pattern:
+# We call at::_ops::{name}::call, which is always exported from
+# libtorch_cpu.so (unlike at::{name}, which is an inline wrapper).
 #
-#   _ZN  2at  {len(name)}{name}  E  {arg_suffix}
-#    ^    ^                       ^
-#    |   namespace "at"           end of nested name
-#    mangled prefix
+# Mangled name pattern for at::_ops::{op}::call({args}):
 #
-# Substitution context after encoding "N 2at {n}{name} E":
-#   S_  = at::              (the namespace)
+#   _ZN  2at  4_ops  {len(op)}{op}  4call  E  {arg_suffix}
+#
+# Substitution context after encoding "N 2at 4_ops {n}{op} 4call E":
+#   S_  = at::
+#   S0_ = at::_ops
+#   S1_ = at::_ops::{op}   (the generated struct)
 # After encoding the first "const at::Tensor &" (RKNS_6TensorE):
-#   S0_ = at::Tensor        (class type)
-#   S1_ = const at::Tensor  (cv-qualified)
-#   S2_ = const at::Tensor& (reference)
+#   S2_ = at::Tensor
+#   S3_ = const at::Tensor
+#   S4_ = const at::Tensor&   ← used as S4_ for second Tensor arg
 #
-# For reduction ops the second argument is
-#   c10::optional<c10::ScalarType>
-# In modern PyTorch c10::optional = std::optional (using-declaration), so
-# it mangles as St8optional (St = std::).  ScalarType lives in c10::,
-# giving N3c1010ScalarTypeE.  The full by-value argument suffix is
-#   St8optionalIN3c1010ScalarTypeEE
-# _bridge.cpp has a static_assert that this type is trivially copyable and
-# 2 bytes, which is why the LLVM IR passes it as i16.
+# For reduction ops the second argument is std::optional<c10::ScalarType>
+# (c10::optional = std::optional via using-declaration in modern PyTorch).
+# St8optional = std::optional, N3c1010ScalarTypeE = c10::ScalarType.
+# _bridge.cpp has a static_assert confirming this type is 2 bytes and
+# trivially copyable, hence passed as i16 in the LLVM IR.
 # ---------------------------------------------------------------------------
 
 _TORCH_LIB = ctypes.CDLL(str(Path(torch.__file__).parent / "lib" / "libtorch_cpu.so"))
 
 # Argument suffix constants (substitutions as annotated above)
-_ARGS_UNARY  = "RKNS_6TensorE"                             # (const Tensor&)
-_ARGS_BINARY = "RKNS_6TensorES2_"                          # (const Tensor&, const Tensor&)
-_ARGS_ALPHA  = "RKNS_6TensorES2_RKN3c106ScalarE"           # (…, const Scalar&)
-_ARGS_REDUCE = "RKNS_6TensorESt8optionalIN3c1010ScalarTypeEE"  # (…, optional<ScalarType>)
+_ARGS_UNARY = "RKNS_6TensorE"  # (const Tensor&)
+_ARGS_BINARY = "RKNS_6TensorES4_"  # (Tensor&, Tensor&)
+_ARGS_ALPHA = "RKNS_6TensorES4_RKN3c106ScalarE"  # (Tensor&, Tensor&, Scalar&)
+_ARGS_REDUCE = (  # (Tensor&, optional<ScalarType>)
+    "RKNS_6TensorESt8optionalIN3c1010ScalarTypeEE"
+)
 
 
-def _mangle_aten(name: str, arg_suffix: str) -> str:
-    """Compute the Itanium mangled name for at::{name}({arg_suffix})."""
-    return f"_ZN2at{len(name)}{name}E{arg_suffix}"
+def _mangle_aten(op: str, arg_suffix: str) -> str:
+    """Compute the Itanium mangled name for at::_ops::{op}::call(...)."""
+    return f"_ZN2at4_ops{len(op)}{op}4callE{arg_suffix}"
 
 
-# (func_name, arg_suffix, llvm_sym, calling_convention)
+# (op_name in at::_ops, arg_suffix, llvm_sym, calling_convention)
 _ATEN_OPS: list[tuple[str, str, str, str]] = [
     # UNARY:     void(sret Tensor*, const Tensor&)
-    ("neg",     _ARGS_UNARY,   "_aten_neg",     "unary"),
-    ("abs",     _ARGS_UNARY,   "_aten_abs",     "unary"),
-    ("exp",     _ARGS_UNARY,   "_aten_exp",     "unary"),
-    ("log",     _ARGS_UNARY,   "_aten_log",     "unary"),
-    ("sqrt",    _ARGS_UNARY,   "_aten_sqrt",    "unary"),
-    ("sin",     _ARGS_UNARY,   "_aten_sin",     "unary"),
-    ("cos",     _ARGS_UNARY,   "_aten_cos",     "unary"),
-    ("tan",     _ARGS_UNARY,   "_aten_tan",     "unary"),
-    ("relu",    _ARGS_UNARY,   "_aten_relu",    "unary"),
-    ("sigmoid", _ARGS_UNARY,   "_aten_sigmoid", "unary"),
-    ("tanh",    _ARGS_UNARY,   "_aten_tanh",    "unary"),
-    ("silu",    _ARGS_UNARY,   "_aten_silu",    "unary"),
+    ("neg", _ARGS_UNARY, "_aten_neg", "unary"),
+    ("abs", _ARGS_UNARY, "_aten_abs", "unary"),
+    ("exp", _ARGS_UNARY, "_aten_exp", "unary"),
+    ("log", _ARGS_UNARY, "_aten_log", "unary"),
+    ("sqrt", _ARGS_UNARY, "_aten_sqrt", "unary"),
+    ("sin", _ARGS_UNARY, "_aten_sin", "unary"),
+    ("cos", _ARGS_UNARY, "_aten_cos", "unary"),
+    ("tan", _ARGS_UNARY, "_aten_tan", "unary"),
+    ("relu", _ARGS_UNARY, "_aten_relu", "unary"),
+    ("sigmoid", _ARGS_UNARY, "_aten_sigmoid", "unary"),
+    ("tanh", _ARGS_UNARY, "_aten_tanh", "unary"),
+    ("silu", _ARGS_UNARY, "_aten_silu", "unary"),
     # REDUCTION: void(sret Tensor*, const Tensor&, i16 optional<ScalarType>)
-    ("sum",     _ARGS_REDUCE,  "_aten_sum",     "reduction"),
-    ("mean",    _ARGS_REDUCE,  "_aten_mean",    "reduction"),
+    ("sum", _ARGS_REDUCE, "_aten_sum", "reduction"),
+    ("mean", _ARGS_REDUCE, "_aten_mean", "reduction"),
     # ALPHA:     void(sret Tensor*, const Tensor&, const Tensor&, const Scalar&)
-    ("add",     _ARGS_ALPHA,   "_aten_add",     "alpha"),
-    ("sub",     _ARGS_ALPHA,   "_aten_sub",     "alpha"),
+    ("add_Tensor", _ARGS_ALPHA, "_aten_add", "alpha"),
+    ("sub_Tensor", _ARGS_ALPHA, "_aten_sub", "alpha"),
     # BINARY:    void(sret Tensor*, const Tensor&, const Tensor&)
-    ("mul",     _ARGS_BINARY,  "_aten_mul",     "binary"),
-    ("div",     _ARGS_BINARY,  "_aten_div",     "binary"),
-    ("matmul",  _ARGS_BINARY,  "_aten_matmul",  "binary"),
-    ("mm",      _ARGS_BINARY,  "_aten_mm",      "binary"),
-    ("pow",     _ARGS_BINARY,  "_aten_pow",     "binary"),
-    ("eq",      _ARGS_BINARY,  "_aten_eq",      "binary"),
-    ("ne",      _ARGS_BINARY,  "_aten_ne",      "binary"),
-    ("lt",      _ARGS_BINARY,  "_aten_lt",      "binary"),
-    ("le",      _ARGS_BINARY,  "_aten_le",      "binary"),
-    ("gt",      _ARGS_BINARY,  "_aten_gt",      "binary"),
-    ("ge",      _ARGS_BINARY,  "_aten_ge",      "binary"),
+    ("mul_Tensor", _ARGS_BINARY, "_aten_mul", "binary"),
+    ("div_Tensor", _ARGS_BINARY, "_aten_div", "binary"),
+    ("matmul", _ARGS_BINARY, "_aten_matmul", "binary"),
+    ("mm", _ARGS_BINARY, "_aten_mm", "binary"),
+    ("pow_Tensor_Tensor", _ARGS_BINARY, "_aten_pow", "binary"),
+    ("eq_Tensor", _ARGS_BINARY, "_aten_eq", "binary"),
+    ("ne_Tensor", _ARGS_BINARY, "_aten_ne", "binary"),
+    ("lt_Tensor", _ARGS_BINARY, "_aten_lt", "binary"),
+    ("le_Tensor", _ARGS_BINARY, "_aten_le", "binary"),
+    ("gt_Tensor", _ARGS_BINARY, "_aten_gt", "binary"),
+    ("ge_Tensor", _ARGS_BINARY, "_aten_ge", "binary"),
 ]
 
 for _name, _args, _llvm_sym, _cc in _ATEN_OPS:
@@ -293,7 +293,9 @@ def _make_unary_intrinsic(sym: str):
                 sym,
             )
             fn.args[0].add_attribute("sret")
-            builder.call(fn, [builder.bitcast(out, i8p), _tensor_slot(builder, args[0])])
+            builder.call(
+                fn, [builder.bitcast(out, i8p), _tensor_slot(builder, args[0])]
+            )
             return builder.load(out)
 
         return sig, codegen
@@ -320,11 +322,14 @@ def _make_binary_intrinsic(sym: str):
                 sym,
             )
             fn.args[0].add_attribute("sret")
-            builder.call(fn, [
-                builder.bitcast(out, i8p),
-                _tensor_slot(builder, args[0]),
-                _tensor_slot(builder, args[1]),
-            ])
+            builder.call(
+                fn,
+                [
+                    builder.bitcast(out, i8p),
+                    _tensor_slot(builder, args[0]),
+                    _tensor_slot(builder, args[1]),
+                ],
+            )
             return builder.load(out)
 
         return sig, codegen
@@ -351,12 +356,15 @@ def _make_alpha_intrinsic(sym: str):
                 sym,
             )
             fn.args[0].add_attribute("sret")
-            builder.call(fn, [
-                builder.bitcast(out, i8p),
-                _tensor_slot(builder, args[0]),
-                _tensor_slot(builder, args[1]),
-                _alpha_scalar_one(builder),
-            ])
+            builder.call(
+                fn,
+                [
+                    builder.bitcast(out, i8p),
+                    _tensor_slot(builder, args[0]),
+                    _tensor_slot(builder, args[1]),
+                    _alpha_scalar_one(builder),
+                ],
+            )
             return builder.load(out)
 
         return sig, codegen
@@ -388,11 +396,14 @@ def _make_reduction_intrinsic(sym: str):
                 sym,
             )
             fn.args[0].add_attribute("sret")
-            builder.call(fn, [
-                builder.bitcast(out, i8p),
-                _tensor_slot(builder, args[0]),
-                ir.Constant(i16, 0),  # nullopt: engaged byte = 0
-            ])
+            builder.call(
+                fn,
+                [
+                    builder.bitcast(out, i8p),
+                    _tensor_slot(builder, args[0]),
+                    ir.Constant(i16, 0),  # nullopt: engaged byte = 0
+                ],
+            )
             return builder.load(out)
 
         return sig, codegen
@@ -404,36 +415,36 @@ def _make_reduction_intrinsic(sym: str):
 # Intrinsic instances
 # ---------------------------------------------------------------------------
 
-_tensor_neg     = _make_unary_intrinsic("_aten_neg")
-_tensor_abs     = _make_unary_intrinsic("_aten_abs")
-_tensor_exp     = _make_unary_intrinsic("_aten_exp")
-_tensor_log     = _make_unary_intrinsic("_aten_log")
-_tensor_sqrt    = _make_unary_intrinsic("_aten_sqrt")
-_tensor_sin     = _make_unary_intrinsic("_aten_sin")
-_tensor_cos     = _make_unary_intrinsic("_aten_cos")
-_tensor_tan     = _make_unary_intrinsic("_aten_tan")
-_tensor_relu    = _make_unary_intrinsic("_aten_relu")
+_tensor_neg = _make_unary_intrinsic("_aten_neg")
+_tensor_abs = _make_unary_intrinsic("_aten_abs")
+_tensor_exp = _make_unary_intrinsic("_aten_exp")
+_tensor_log = _make_unary_intrinsic("_aten_log")
+_tensor_sqrt = _make_unary_intrinsic("_aten_sqrt")
+_tensor_sin = _make_unary_intrinsic("_aten_sin")
+_tensor_cos = _make_unary_intrinsic("_aten_cos")
+_tensor_tan = _make_unary_intrinsic("_aten_tan")
+_tensor_relu = _make_unary_intrinsic("_aten_relu")
 _tensor_sigmoid = _make_unary_intrinsic("_aten_sigmoid")
-_tensor_tanh    = _make_unary_intrinsic("_aten_tanh")
-_tensor_silu    = _make_unary_intrinsic("_aten_silu")
+_tensor_tanh = _make_unary_intrinsic("_aten_tanh")
+_tensor_silu = _make_unary_intrinsic("_aten_silu")
 
-_tensor_sum     = _make_reduction_intrinsic("_aten_sum")
-_tensor_mean    = _make_reduction_intrinsic("_aten_mean")
+_tensor_sum = _make_reduction_intrinsic("_aten_sum")
+_tensor_mean = _make_reduction_intrinsic("_aten_mean")
 
-_tensor_add     = _make_alpha_intrinsic("_aten_add")
-_tensor_sub     = _make_alpha_intrinsic("_aten_sub")
+_tensor_add = _make_alpha_intrinsic("_aten_add")
+_tensor_sub = _make_alpha_intrinsic("_aten_sub")
 
-_tensor_mul     = _make_binary_intrinsic("_aten_mul")
-_tensor_div     = _make_binary_intrinsic("_aten_div")
-_tensor_matmul  = _make_binary_intrinsic("_aten_matmul")
-_tensor_mm      = _make_binary_intrinsic("_aten_mm")
-_tensor_pow     = _make_binary_intrinsic("_aten_pow")
-_tensor_eq      = _make_binary_intrinsic("_aten_eq")
-_tensor_ne      = _make_binary_intrinsic("_aten_ne")
-_tensor_lt      = _make_binary_intrinsic("_aten_lt")
-_tensor_le      = _make_binary_intrinsic("_aten_le")
-_tensor_gt      = _make_binary_intrinsic("_aten_gt")
-_tensor_ge      = _make_binary_intrinsic("_aten_ge")
+_tensor_mul = _make_binary_intrinsic("_aten_mul")
+_tensor_div = _make_binary_intrinsic("_aten_div")
+_tensor_matmul = _make_binary_intrinsic("_aten_matmul")
+_tensor_mm = _make_binary_intrinsic("_aten_mm")
+_tensor_pow = _make_binary_intrinsic("_aten_pow")
+_tensor_eq = _make_binary_intrinsic("_aten_eq")
+_tensor_ne = _make_binary_intrinsic("_aten_ne")
+_tensor_lt = _make_binary_intrinsic("_aten_lt")
+_tensor_le = _make_binary_intrinsic("_aten_le")
+_tensor_gt = _make_binary_intrinsic("_aten_gt")
+_tensor_ge = _make_binary_intrinsic("_aten_ge")
 
 # ---------------------------------------------------------------------------
 # Operator overloads

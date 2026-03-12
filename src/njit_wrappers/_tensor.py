@@ -71,10 +71,8 @@ _bridge_lib = ctypes.CDLL(_bridge_module.__file__)
 # Reference-management symbols (bridge extension)
 # ---------------------------------------------------------------------------
 
-_bridge_lib.njit_extract_impl.restype = ctypes.c_int64
-_bridge_lib.njit_extract_impl.argtypes = [ctypes.py_object]
-_bridge_lib.njit_release_impl.restype = None
-_bridge_lib.njit_release_impl.argtypes = [ctypes.c_int64]
+_bridge_lib.njit_borrow_impl.restype = ctypes.c_int64
+_bridge_lib.njit_borrow_impl.argtypes = [ctypes.py_object]
 _bridge_lib.njit_wrap_impl.restype = ctypes.py_object
 _bridge_lib.njit_wrap_impl.argtypes = [ctypes.c_int64]
 
@@ -86,8 +84,7 @@ def _fn_addr(lib: ctypes.CDLL, mangled: str) -> int:
     return addr
 
 
-llvm.add_symbol("njit_extract_impl", _fn_addr(_bridge_lib, "njit_extract_impl"))
-llvm.add_symbol("njit_release_impl", _fn_addr(_bridge_lib, "njit_release_impl"))
+llvm.add_symbol("njit_borrow_impl", _fn_addr(_bridge_lib, "njit_borrow_impl"))
 llvm.add_symbol("njit_wrap_impl", _fn_addr(_bridge_lib, "njit_wrap_impl"))
 
 # ---------------------------------------------------------------------------
@@ -202,22 +199,17 @@ class TensorModel(models.PrimitiveModel):
 @unbox(TensorType)
 def unbox_tensor(typ, obj, c):
     i64 = ir.IntType(64)
-    extract_fn = cgutils.get_or_insert_function(
+    # Borrow the TensorImpl* without touching the refcount.  The Python
+    # object is kept alive by the caller for the duration of the njit call,
+    # so a borrowed reference is safe and avoids the cost of an atomic
+    # incref + decref pair on every invocation.
+    borrow_fn = cgutils.get_or_insert_function(
         c.builder.module,
         ir.FunctionType(i64, [ir.IntType(8).as_pointer()]),
-        "njit_extract_impl",
+        "njit_borrow_impl",
     )
-    impl = c.builder.call(extract_fn, [obj])
-    release_fn = cgutils.get_or_insert_function(
-        c.builder.module,
-        ir.FunctionType(ir.VoidType(), [i64]),
-        "njit_release_impl",
-    )
-
-    def cleanup():
-        c.builder.call(release_fn, [impl])
-
-    return NativeValue(impl, cleanup=cleanup)
+    impl = c.builder.call(borrow_fn, [obj])
+    return NativeValue(impl)
 
 
 @box(TensorType)

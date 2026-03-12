@@ -16,21 +16,13 @@ static_assert(sizeof(c10::optional<c10::ScalarType>) == 2,
 
 extern "C" {
 
-// Extract TensorImpl* from a Python torch.Tensor and increment its refcount.
-// The caller owns the returned reference and must eventually call
-// njit_release_impl() or transfer ownership via njit_wrap_impl().
-int64_t njit_extract_impl(PyObject* obj) {
+// Borrow TensorImpl* from a Python torch.Tensor WITHOUT touching the refcount.
+// Safe because the Python object (and hence its TensorImpl) is guaranteed to be
+// alive for the entire duration of the njit call.  No release is needed.
+int64_t njit_borrow_impl(PyObject* obj) {
   const at::Tensor& tensor = THPVariable_Unpack(obj);
   c10::TensorImpl* impl = tensor.unsafeGetTensorImpl();
-  c10::raw::intrusive_ptr::incref(impl);
   return (int64_t)(void*)impl;
-}
-
-// Decrement the refcount of a TensorImpl*.
-// Use this to release an owned reference that will not be boxed.
-void njit_release_impl(int64_t impl_int) {
-  c10::TensorImpl* impl = (c10::TensorImpl*)(void*)impl_int;
-  c10::raw::intrusive_ptr::decref(impl);
 }
 
 // Wrap a TensorImpl* (owned ref) into a Python torch.Tensor, stealing the ref.

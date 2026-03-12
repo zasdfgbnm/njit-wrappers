@@ -107,6 +107,35 @@ def bench(fn, args, warmup=WARMUP, iters=ITERS):
     return elapsed / iters * 1e6  # → µs
 
 
+def _robust_polyfit(xs, ys, threshold=2.0):
+    """Fit y = k*x + b, removing outliers whose residual exceeds *threshold* σ.
+
+    Performs an initial fit, computes residuals, discards points beyond
+    *threshold* standard deviations, then refits on the clean data.
+    """
+    k, b = np.polyfit(xs, ys, 1)
+    residuals = ys - (k * xs + b)
+    std = np.std(residuals)
+    mask = np.abs(residuals) <= threshold * std
+    return np.polyfit(xs[mask], ys[mask], 1)
+
+
+def _robust_fit_through_origin(xs, ys, threshold=2.0):
+    """Fit y = k*x (forcing b=0), removing outliers beyond *threshold* σ.
+
+    Uses least-squares with no intercept: k = Σ(x·y) / Σ(x²).
+    """
+
+    def _fit(x, y):
+        return float(np.sum(x * y) / np.sum(x * x))
+
+    k = _fit(xs, ys)
+    residuals = ys - k * xs
+    std = np.std(residuals)
+    mask = np.abs(residuals) <= threshold * std
+    return _fit(xs[mask], ys[mask])
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -137,17 +166,19 @@ def main():
 
         print(f"  ops={n_ops:3d}  njit={t_njit:8.2f} µs  eager={t_eager:8.2f} µs")
 
-    # -- Linear fits: y = k*x + b --
+    # -- Linear fits (with outlier removal) --
+    #   njit:  y = k*x + b  (free intercept — real fixed overhead from dispatcher)
+    #   eager: y = k*x      (forced through origin — no fixed overhead)
     xs = np.array(op_counts, dtype=np.float64)
     ys_njit = np.array(times_njit, dtype=np.float64)
     ys_eager = np.array(times_eager, dtype=np.float64)
 
-    k_njit, b_njit = np.polyfit(xs, ys_njit, 1)
-    k_eager, b_eager = np.polyfit(xs, ys_eager, 1)
+    k_njit, b_njit = _robust_polyfit(xs, ys_njit)
+    k_eager = _robust_fit_through_origin(xs, ys_eager)
 
-    print("\nLinear fit  y = k*x + b")
-    print(f"  njit:   k = {k_njit:.4f} µs/op,  b = {b_njit:.4f} µs")
-    print(f"  eager:  k = {k_eager:.4f} µs/op,  b = {b_eager:.4f} µs")
+    print("\nLinear fit (outliers removed)")
+    print(f"  njit:   y = {k_njit:.4f}x + {b_njit:.4f}  (µs)")
+    print(f"  eager:  y = {k_eager:.4f}x           (µs, b forced to 0)")
 
     # -- Console table --
     print(f"\nCPU overhead on CUDA tiny tensors (4×4), {ITERS} iterations\n")
@@ -162,7 +193,7 @@ def main():
 
     fit_xs = np.linspace(MIN_OPS, MAX_OPS, 200)
     fit_njit = k_njit * fit_xs + b_njit
-    fit_eager = k_eager * fit_xs + b_eager
+    fit_eager = k_eager * fit_xs
 
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.scatter(op_counts, times_eager, s=12, alpha=0.5, label="eager (data)")
@@ -172,7 +203,7 @@ def main():
         fit_eager,
         "-",
         linewidth=2,
-        label=f"eager fit: y = {k_eager:.2f}x + {b_eager:.2f}",
+        label=f"eager fit: y = {k_eager:.2f}x",
     )
     ax.plot(
         fit_xs,
@@ -217,20 +248,21 @@ Each graph is simply `for i in range(N): x = torch.relu(x)`.
 
 ![overhead_vs_ops]({plot_name})
 
-### Linear fit: `y = k * x + b`
+### Linear fit (outliers removed, 2σ threshold)
 
-|       | k (µs/op) | b (µs)  |
-|-------|-----------|---------|
-| njit  | {k_njit:.4f}    | {b_njit:.4f}  |
-| eager | {k_eager:.4f}    | {b_eager:.4f}  |
+|       | model     | k (µs/op) | b (µs)  |
+|-------|-----------|-----------|---------|
+| njit  | y = kx+b  | {k_njit:.4f}    | {b_njit:.4f}  |
+| eager | y = kx    | {k_eager:.4f}    | 0 (forced) |
 
 - **k** (slope) is the **per-op cost** — the marginal time (in µs) added by
   each additional `torch.relu` call.  A smaller *k* means each op dispatches
   faster.
 - **b** (intercept) is the **fixed overhead** — the baseline time (in µs) for
   entering and leaving the function, independent of how many ops it contains.
-  This captures things like the Python → njit transition cost or the eager
-  Python function-call overhead.
+  For njit, this captures the Numba dispatcher + tensor borrow/wrap cost.
+  For eager, *b* is forced to 0 because plain Python function calls have no
+  meaningful fixed overhead beyond the per-op cost itself.
 
 ### Raw data
 

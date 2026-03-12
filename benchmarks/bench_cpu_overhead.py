@@ -27,16 +27,6 @@ import njit_wrappers  # noqa: F401 – registers TensorType
 # ---------------------------------------------------------------------------
 
 
-@numba.njit
-def graph_njit(x, w1, b1, w2, b2):
-    h = torch.relu(x @ w1 + b1)
-    h = torch.sigmoid(h @ w2 + b2)
-    t = torch.sin(h) * torch.cos(h) + torch.tan(h)
-    u = torch.exp(t) - torch.sqrt(torch.abs(t))
-    o = torch.tanh(u / (u + u))
-    return torch.sum(o) + torch.mean(o)
-
-
 def graph_eager(x, w1, b1, w2, b2):
     h = torch.relu(x @ w1 + b1)
     h = torch.sigmoid(h @ w2 + b2)
@@ -44,6 +34,9 @@ def graph_eager(x, w1, b1, w2, b2):
     u = torch.exp(t) - torch.sqrt(torch.abs(t))
     o = torch.tanh(u / (u + u))
     return torch.sum(o) + torch.mean(o)
+
+
+graph_njit = numba.njit(graph_eager)
 
 
 # ---------------------------------------------------------------------------

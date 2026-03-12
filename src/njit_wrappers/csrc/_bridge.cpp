@@ -25,6 +25,13 @@ int64_t njit_borrow_impl(PyObject* obj) {
   return (int64_t)(void*)impl;
 }
 
+// Extract the raw storage data pointer from a TensorImpl*.
+// Returns a uint64_t suitable for passing to CUDA kernels.
+uint64_t njit_data_ptr(int64_t impl_int) {
+  c10::TensorImpl* impl = (c10::TensorImpl*)(void*)impl_int;
+  return (uint64_t)impl->data();
+}
+
 // Wrap a TensorImpl* (owned ref) into a Python torch.Tensor, stealing the ref.
 // After this call, the int64 handle must not be used again.
 PyObject* njit_wrap_impl(int64_t impl_int) {

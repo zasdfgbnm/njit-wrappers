@@ -19,14 +19,18 @@ Usage::
     launch_add = numba_add.launch
 
     @numba.njit
-    def f(x_ptr, y_ptr, out_ptr, n, stream):
+    def f(x, y, out, n, stream):
         grid = (n + 1023) // 1024
-        launch_add(grid, 1, 1, stream, x_ptr, y_ptr, out_ptr, n)
+        launch_add(grid, 1, 1, stream, x, y, out, n)
 
 Note: The launch function must be extracted into a variable
 (e.g. ``launch_add = numba_add.launch``) before being used inside
 ``@numba.njit``. Numba cannot resolve attribute access on custom Python
 objects within compiled code.
+
+Pointer arguments (``*fp32``, ``*fp64``, etc.) accept ``torch.Tensor``
+directly — the device pointer is extracted automatically inside the
+compiled function.
 
 Limitations:
     - No scratch memory (asserts global_scratch_size == 0 and
@@ -487,6 +491,7 @@ def _make_njit_launcher(
     coop_arr,
     pdl_arr,
     arg_names,
+    arg_types,
 ):
     """Generate an @njit function that dispatches to the right variant.
 
@@ -506,6 +511,10 @@ def _make_njit_launcher(
         numpy.ndarray of int32. Kernel metadata arrays indexed by bitmask.
     arg_names : list of str
         Names of the kernel arguments.
+    arg_types : list of str
+        Triton type strings for each arg in arg_names.  Pointer types
+        (starting with ``*``) accept ``TensorType`` and auto-extract
+        the device pointer.
 
     Returns
     -------
@@ -513,11 +522,23 @@ def _make_njit_launcher(
         An @njit function with signature:
         launch(gridX, gridY, gridZ, stream, arg0, arg1, ..., argN)
     """
+    # Identify which args are pointers (accept TensorType, need data_ptr extraction)
+    ptr_arg_indices = set()
+    for i, ty in enumerate(arg_types):
+        if ty.startswith("*"):
+            ptr_arg_indices.add(i)
+
     arg_list = ", ".join(arg_names)
     if arg_list:
         sig_args = f"gridX, gridY, gridZ, stream, {arg_list}"
     else:
         sig_args = "gridX, gridY, gridZ, stream"
+
+    # Generate data_ptr extraction lines for pointer args
+    data_ptr_lines = []
+    for i, name in enumerate(arg_names):
+        if i in ptr_arg_indices:
+            data_ptr_lines.append(f"    {name} = _data_ptr({name})")
 
     mask_lines = []
     if specializable_bit_positions:
@@ -547,11 +568,17 @@ def _make_njit_launcher(
         call_args_list.append(arg_list)
     call_args = ", ".join(call_args_list)
 
+    data_ptr_block = "\n".join(data_ptr_lines)
+    if data_ptr_block:
+        data_ptr_block += "\n"
+
     src = f"""\
 def _launch({sig_args}):
-{mask_block}
+{data_ptr_block}{mask_block}
     _cfunc({call_args})
 """
+
+    from njit_wrappers._tensor import _tensor_data_ptr
 
     namespace = {
         "_cfunc": cfunc,
@@ -561,6 +588,7 @@ def _launch({sig_args}):
         "_coop": coop_arr,
         "_pdl": pdl_arr,
         "_shared": shared_arr,
+        "_data_ptr": _tensor_data_ptr,
     }
 
     exec(src, namespace)  # noqa: S102
@@ -620,6 +648,7 @@ class NumbaTritonKernel:
             coop_arr=coop_arr,
             pdl_arr=pdl_arr,
             arg_names=arg_names,
+            arg_types=arg_types,
         )
 
         # Keep references to prevent GC
@@ -633,8 +662,9 @@ class NumbaTritonKernel:
 
         Signature: ``launch(gridX, gridY, gridZ, stream, arg0, ..., argN)``
 
-        All arguments must be scalar C types (int32, int64, uint64 for
-        pointers, etc.). Stream must be passed as a uint64
-        (e.g., ``torch.cuda.current_stream().cuda_stream``).
+        Pointer arguments accept ``torch.Tensor`` directly — the device
+        pointer is extracted automatically.  Non-pointer arguments must
+        be scalar C types (int32, float, etc.).  Stream must be passed
+        as a uint64 (e.g., ``torch.cuda.current_stream().cuda_stream``).
         """
         return self._njit_launch

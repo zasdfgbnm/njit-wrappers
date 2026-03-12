@@ -87,6 +87,10 @@ def _fn_addr(lib: ctypes.CDLL, mangled: str) -> int:
 llvm.add_symbol("njit_borrow_impl", _fn_addr(_bridge_lib, "njit_borrow_impl"))
 llvm.add_symbol("njit_wrap_impl", _fn_addr(_bridge_lib, "njit_wrap_impl"))
 
+_bridge_lib.njit_data_ptr.restype = ctypes.c_uint64
+_bridge_lib.njit_data_ptr.argtypes = [ctypes.c_int64]
+llvm.add_symbol("njit_data_ptr", _fn_addr(_bridge_lib, "njit_data_ptr"))
+
 # ---------------------------------------------------------------------------
 # ATen symbol resolution via Itanium C++ name mangling computed in Python.
 #
@@ -437,6 +441,30 @@ _tensor_lt = _make_binary_intrinsic("_aten_lt")
 _tensor_le = _make_binary_intrinsic("_aten_le")
 _tensor_gt = _make_binary_intrinsic("_aten_gt")
 _tensor_ge = _make_binary_intrinsic("_aten_ge")
+
+# ---------------------------------------------------------------------------
+# Tensor data pointer extraction (for Triton kernel launches)
+# ---------------------------------------------------------------------------
+
+
+@intrinsic
+def _tensor_data_ptr(typingctx, a):
+    """Extract the raw device pointer from a TensorType as uint64."""
+    if not isinstance(a, TensorType):
+        return None
+    sig = types.uint64(tensor_type)
+
+    def codegen(context, builder, signature, args):
+        i64 = ir.IntType(64)
+        fn = cgutils.get_or_insert_function(
+            builder.module,
+            ir.FunctionType(i64, [i64]),
+            "njit_data_ptr",
+        )
+        return builder.call(fn, [args[0]])
+
+    return sig, codegen
+
 
 # ---------------------------------------------------------------------------
 # Operator overloads

@@ -32,15 +32,20 @@ numba_add = NumbaTritonKernel(
 launch_add = numba_add.launch  # extract the @njit function
 
 @numba.njit
-def f(x_ptr, y_ptr, out_ptr, n, stream):
+def f(x, y, out, n, stream):
     grid = (n + 1023) // 1024
-    launch_add(grid, 1, 1, stream, x_ptr, y_ptr, out_ptr, n)
+    launch_add(grid, 1, 1, stream, x, y, out, n)
 ```
 
 The `launch` function signature is
 `launch(gridX, gridY, gridZ, stream, arg0, arg1, ..., argN)`.
 Grid dimensions and CUDA stream are explicit; kernel arguments follow
 in the same order as the `signature` dict (minus constexprs).
+
+Pointer arguments (`*fp32`, `*fp64`, etc.) accept `torch.Tensor`
+directly — the device pointer is extracted automatically inside the
+compiled function.  Non-pointer arguments (scalars) must be passed as
+their corresponding C types.
 
 **Note:** The launch function must be extracted into a module-level
 variable (e.g. `launch_add = numba_add.launch`) before being used

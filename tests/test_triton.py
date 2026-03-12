@@ -81,11 +81,11 @@ def test_vector_add_basic():
     stream = torch.cuda.current_stream().cuda_stream
 
     @numba.njit
-    def f(x_ptr, y_ptr, out_ptr, n, stream):
+    def f(x, y, out, n, stream):
         grid = (n + 1023) // 1024
-        launch_add(grid, 1, 1, stream, x_ptr, y_ptr, out_ptr, n)
+        launch_add(grid, 1, 1, stream, x, y, out, n)
 
-    f(x.data_ptr(), y.data_ptr(), out.data_ptr(), n, stream)
+    f(x, y, out, n, stream)
     torch.cuda.synchronize()
 
     assert torch.allclose(out, x + y), f"max diff: {(out - x - y).abs().max().item()}"
@@ -116,11 +116,11 @@ def test_vector_add_large():
     stream = torch.cuda.current_stream().cuda_stream
 
     @numba.njit
-    def f(x_ptr, y_ptr, out_ptr, n, stream):
+    def f(x, y, out, n, stream):
         grid = (n + 1023) // 1024
-        launch_add(grid, 1, 1, stream, x_ptr, y_ptr, out_ptr, n)
+        launch_add(grid, 1, 1, stream, x, y, out, n)
 
-    f(x.data_ptr(), y.data_ptr(), out.data_ptr(), n, stream)
+    f(x, y, out, n, stream)
     torch.cuda.synchronize()
 
     assert torch.allclose(out, x + y, atol=1e-5), (
@@ -152,12 +152,12 @@ def test_mixed_types():
     stream = torch.cuda.current_stream().cuda_stream
 
     @numba.njit
-    def f(x_ptr, out_ptr, n, scale, stream):
+    def f(x, out, n, scale, stream):
         grid = (n + 1023) // 1024
-        launch_scale(grid, 1, 1, stream, x_ptr, out_ptr, n, scale)
+        launch_scale(grid, 1, 1, stream, x, out, n, scale)
 
     scale_val = 2.5
-    f(x.data_ptr(), out.data_ptr(), n, scale_val, stream)
+    f(x, out, n, scale_val, stream)
     torch.cuda.synchronize()
 
     expected = x * scale_val
@@ -192,11 +192,11 @@ def test_numba_kernel_matches_expected():
     stream = torch.cuda.current_stream().cuda_stream
 
     @numba.njit
-    def f(x_ptr, y_ptr, out_ptr, n, stream):
+    def f(x, y, out, n, stream):
         grid = (n + 1023) // 1024
-        launch_add(grid, 1, 1, stream, x_ptr, y_ptr, out_ptr, n)
+        launch_add(grid, 1, 1, stream, x, y, out, n)
 
-    f(x.data_ptr(), y.data_ptr(), out_numba.data_ptr(), n, stream)
+    f(x, y, out_numba, n, stream)
     torch.cuda.synchronize()
 
     assert torch.allclose(out_numba, expected), (
@@ -229,12 +229,12 @@ def test_empty_grid():
     stream = torch.cuda.current_stream().cuda_stream
 
     @numba.njit
-    def f(x_ptr, y_ptr, out_ptr, n, stream):
+    def f(x, y, out, n, stream):
         grid = (n + 1023) // 1024
-        launch_add(grid, 1, 1, stream, x_ptr, y_ptr, out_ptr, n)
+        launch_add(grid, 1, 1, stream, x, y, out, n)
 
     # Should not crash even with grid=0
-    f(x.data_ptr(), y.data_ptr(), out.data_ptr(), n, stream)
+    f(x, y, out, n, stream)
     torch.cuda.synchronize()
 
 
@@ -289,11 +289,11 @@ def test_specialization_correctness_aligned():
     stream = torch.cuda.current_stream().cuda_stream
 
     @numba.njit
-    def f(x_ptr, y_ptr, out_ptr, n, stream):
+    def f(x, y, out, n, stream):
         grid = (n + 1023) // 1024
-        launch_add(grid, 1, 1, stream, x_ptr, y_ptr, out_ptr, n)
+        launch_add(grid, 1, 1, stream, x, y, out, n)
 
-    f(x.data_ptr(), y.data_ptr(), out.data_ptr(), n, stream)
+    f(x, y, out, n, stream)
     torch.cuda.synchronize()
 
     assert torch.allclose(out, x + y), f"max diff: {(out - x - y).abs().max().item()}"
@@ -325,11 +325,11 @@ def test_specialization_correctness_unaligned():
     stream = torch.cuda.current_stream().cuda_stream
 
     @numba.njit
-    def f(x_ptr, y_ptr, out_ptr, n, stream):
+    def f(x, y, out, n, stream):
         grid = (n + 1023) // 1024
-        launch_add(grid, 1, 1, stream, x_ptr, y_ptr, out_ptr, n)
+        launch_add(grid, 1, 1, stream, x, y, out, n)
 
-    f(x.data_ptr(), y.data_ptr(), out.data_ptr(), n, stream)
+    f(x, y, out, n, stream)
     torch.cuda.synchronize()
 
     assert torch.allclose(out, x + y), f"max diff: {(out - x - y).abs().max().item()}"

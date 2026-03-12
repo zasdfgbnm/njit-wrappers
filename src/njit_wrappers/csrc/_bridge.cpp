@@ -1,8 +1,18 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <c10/core/ScalarType.h>
 #include <c10/core/TensorImpl.h>
+#include <c10/util/Optional.h>
 #include <c10/util/intrusive_ptr.h>
 #include <torch/csrc/autograd/python_variable.h>
+
+// Verify the ABI assumption relied on by _make_reduction_intrinsic in
+// _tensor.py: c10::optional<c10::ScalarType> must be trivially copyable
+// and exactly 2 bytes so that SysV x86-64 passes it by value as i16.
+static_assert(std::is_trivially_copyable<c10::optional<c10::ScalarType>>::value,
+              "c10::optional<ScalarType> must be trivially copyable (i16 by-value ABI)");
+static_assert(sizeof(c10::optional<c10::ScalarType>) == 2,
+              "c10::optional<ScalarType> must be exactly 2 bytes");
 
 extern "C" {
 

@@ -32,13 +32,12 @@ static inline at::Tensor tensor_from_impl(int64_t impl_int) {
 }
 
 // Helper: extract TensorImpl* from at::Tensor result, returning owned ref.
-// The Tensor is consumed (moved), so its destructor decrefs. We incref first
-// to give the caller a fresh owned reference.
-static inline int64_t impl_from_tensor(at::Tensor t) {
+// Takes ownership of the tensor (rvalue ref) — no copy overhead.
+static inline int64_t impl_from_tensor(at::Tensor&& t) {
   c10::TensorImpl* impl = t.unsafeGetTensorImpl();
   c10::raw::intrusive_ptr::incref(impl);
   return reinterpret_cast<int64_t>(impl);
-  // t destructs here, decrefs. Net: caller has one owned ref.
+  // t destructs here (moved-from state), decrefs. Net: caller has one owned ref.
 }
 
 extern "C" {

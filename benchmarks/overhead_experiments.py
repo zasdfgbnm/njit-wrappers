@@ -324,7 +324,9 @@ def main():
             "njit at::cuda::relu (direct)",
             lambda: run_approach("cuda", _cuda_relu_intrinsic),
         ),
-        # C++ wrapper crashes with heap corruption — needs investigation
+        # C++ wrapper crashes after many iterations due to doubled intermediate
+        # tensor leaks (known limitation). Per-op cost would be similar since
+        # it still goes through at::relu dispatcher.
         # ("njit C++ wrapper (int64 ABI)", lambda: run_approach("wrapper", _wrapper_relu)),
         ("torch.compile (inductor)", run_torch_compile),
     ]

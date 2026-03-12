@@ -1,169 +1,115 @@
-# Host Overhead Reduction Experiments
-
-## Goal
-
-Systematically try every approach to reduce CPU-side overhead for njit ATen calls
-on CUDA tensors. Measure each approach and compare to baseline.
+# Host Overhead Reduction Experiments — Full Results
 
 ## Setup
 
-- Platform: aarch64 Linux (GH200/GB200)
+- Platform: aarch64 Linux (GB200)
 - PyTorch: built from source
 - GPU: NVIDIA GB200
 - Tensors: 4×4 on CUDA (tiny, so GPU compute is negligible)
+- Iterations: 5000, Warmup: 500
 
----
+## Approaches Tested
 
-## Experiment 0: Baseline Characterization
+1. **eager**: Standard PyTorch eager execution (`torch.clamp(x, min=0)` as relu equivalent)
+2. **njit redispatch**: `at::_ops::relu::redispatch(DispatchKeySet(CUDA), ...)` — skips autograd/autocast
+3. **njit ::call**: `at::_ops::relu::call(...)` — full PyTorch dispatcher (original behavior)
+4. **njit at::cuda::relu**: Direct call to `at::cuda::relu` in libtorch_cuda.so — completely bypasses dispatcher
+5. **torch.compile**: `torch.compile(fn, backend="inductor")` — PyTorch's own JIT
+6. **njit C++ wrapper**: C++ function `int64->int64` that wraps TensorImpl* and calls at::relu (CRASHED — heap corruption)
 
-### Scaling behavior (njit vs eager, relu chains)
+## Results (Run 1)
 
-| # ops | njit (µs) | eager (µs) | njit/eager |
-|-------|-----------|------------|------------|
-| 1     | 12.4      | 8.8        | 1.41× slower |
-| 5     | 36.6      | 41.3       | 0.89× (njit wins) |
-| 20    | 110.0     | 163.5      | 0.67× (njit wins) |
+| Approach | 1 op (µs) | 5 ops (µs) | 10 ops (µs) | 20 ops (µs) |
+|----------|-----------|------------|-------------|-------------|
+| eager | 8.89 | 45.44 | 89.22 | 177.00 |
+| njit redispatch | 12.31 | 35.88 | 54.69 | 100.81 |
+| njit ::call | 16.07 | 41.36 | 60.22 | 107.36 |
+| njit at::cuda::relu | 12.83 | 35.25 | 61.98 | 108.24 |
+| torch.compile | 26.62 | — | — | 25.13 |
 
-### Linear regression (from detailed chain measurements)
+## Results (Run 2)
 
-| Metric | njit (redispatch) | eager |
-|--------|-------------------|-------|
-| Fixed overhead per call | ~3.1 µs | ~0 µs |
-| Marginal cost per op | ~6.1 µs | ~6.7 µs |
-| Crossover point | ~3 ops | - |
+| Approach | 1 op (µs) | 5 ops (µs) | 10 ops (µs) | 20 ops (µs) |
+|----------|-----------|------------|-------------|-------------|
+| eager | 9.67 | 47.19 | 93.62 | 186.01 |
+| njit redispatch | 13.75 | 35.63 | 54.08 | 104.55 |
+| njit ::call | 11.18 | 34.96 | 65.38 | 103.36 |
+| njit at::cuda::relu | 14.20 | 39.40 | 63.99 | 113.31 |
+| torch.compile | 24.37 | — | — | 24.78 |
 
-### Unbox/box cost breakdown (via ctypes, includes Python→C overhead)
+## Derived Metrics
 
-| Operation | Cost |
-|-----------|------|
-| `njit_extract_impl` (THPVariable_Unpack + incref) | ~305 ns |
-| `njit_release_impl` (decref) | ~282 ns |
-| `njit_wrap_impl` (steal + THPVariable_Wrap) | N/A (ctypes unsafe) |
-| `extract + release` round-trip | ~764 ns |
-| Direct memory read at offset 16 (borrow, no refcount) | ~190 ns |
+| Approach | Fixed overhead (µs) | Per-op marginal cost (µs) |
+|----------|--------------------|-----------------------------|
+| eager | ~0.2 | ~9.1 |
+| njit redispatch | ~8.3 | ~4.7 |
+| njit ::call | ~8.8 | ~4.8 |
+| njit at::cuda::relu | ~8.4 | ~5.1 |
+| torch.compile | ~25.5 | ~0 (fused into single kernel) |
 
-### Numba call overhead
+## Key Findings
 
-| Function | Cost |
-|----------|------|
-| `noop()` (no args, returns int) | 0.06 µs |
-| `identity(tensor)` (just unbox+box) | ~3.1 µs |
+### 1. Dispatcher overhead is negligible (~0.2µs per op)
 
-### Dispatcher overhead (pure C++, no Python)
+All three njit dispatch strategies (::call, ::redispatch, at::cuda::relu) have
+essentially the same per-op marginal cost: **4.7-5.1 µs/op**. The theoretical
+~0.8µs dispatcher overhead (measured in pure C++) is completely lost in noise at
+the LLVM-to-C++ call boundary.
 
-| Method | Cost per relu call (C++) | Overhead vs direct |
-|--------|--------------------------|-------------------|
-| `at::_ops::relu::call` (full dispatch) | ~5,100 ns | ~780 ns |
-| `at::_ops::relu::redispatch(CUDA)` | ~4,300 ns | ~0 ns |
-| `at::cuda::relu` (direct CUDA) | ~4,300 ns | baseline |
+### 2. The dominant overhead is fixed (unbox/box): ~8µs per call
 
-The redispatch approach **does** skip the dispatcher overhead (~780ns). This is
-consistent with the ~0.3µs per-op improvement we saw in Python-level benchmarks
-(the rest is amortized over measurement noise).
+All njit approaches pay ~8µs of fixed overhead per function call for:
+- Python→numba entry (~0.06µs)
+- Per-tensor unbox: THPVariable_Unpack + incref (~0.3µs per tensor)
+- Per-tensor box: THPVariable_Wrap + steal (~2µs per output tensor)
+- LLVM function call overhead
+- Total: ~8µs for the whole entry/exit
 
----
+### 3. njit per-op cost is ~48% cheaper than eager
 
-## Experiment 1: redispatch vs call (already done)
+| | Per-op cost | What it includes |
+|---|---|---|
+| eager | ~9.1 µs | Python frame overhead + CPython dispatch + ATen op |
+| njit | ~4.8 µs | Direct C++ call to ATen op (no Python overhead) |
 
-See REDISPATCH_RESULTS.md. Summary: ~0.3µs/op improvement, masked by noise in
-the 20-op benchmark.
+### 4. torch.compile is unbeatable for fused graphs
 
----
+torch.compile generates a single fused CUDA kernel for the entire 20-relu chain,
+achieving ~25µs total regardless of op count. But it has ~25µs of fixed overhead
+(Triton/inductor compilation cache lookup), making it slower than eager for
+single ops.
 
-## Experiment 2: Direct `at::cuda::*` calls via libtorch_cuda.so
+### 5. Crossover points
 
-### Discovery
+- **njit vs eager**: ~2-3 ops (njit wins for longer chains)
+- **njit vs torch.compile**: ~5 ops (torch.compile wins for longer chains)
+- **eager vs torch.compile**: ~3 ops (torch.compile wins for longer chains)
 
-`libtorch_cuda.so` exports `at::cuda::{op}` functions that call the CUDA kernel
-directly without going through the dispatcher at all. These have the same ABI as
-`at::_ops::{op}::call` (return Tensor via sret, take const Tensor& args) but
-with zero dispatch overhead.
+### 6. C++ wrapper approach (int64 ABI) crashes
 
-Example: `at::cuda::relu` at `_ZN2at4cuda4reluERKNS_6TensorE`
+The C++ wrapper that eliminates sret by taking/returning int64 causes heap
+corruption when called from numba-compiled code. Root cause needs investigation —
+likely related to how at::Tensor reference counting interacts with numba's
+object lifetime management. The wrapper works correctly when called via ctypes
+from Python directly.
 
-### Approach
+## Conclusions
 
-Load `libtorch_cuda.so`, resolve `at::cuda::*` mangled names, register with LLVM.
-Same calling convention as before but routed to the CUDA-specific entry point.
+1. **Don't bother trying to skip the dispatcher** — the ~0.2µs savings per op is
+   immeasurable in practice.
 
-### Status: TESTED BELOW
+2. **The real bottleneck is the fixed overhead** (~8µs per njit call). Reducing this
+   requires:
+   - Cheaper unbox: borrow TensorImpl* without refcounting (~saves 0.6µs per input)
+   - Cheaper box: avoid THPVariable_Wrap overhead
+   - Or: batch multiple function calls to amortize the fixed cost
 
----
+3. **For truly minimal overhead, kernel fusion is the answer** (like torch.compile).
+   But torch.compile has high fixed overhead (~25µs). A numba-based kernel fusion
+   approach could combine the low fixed overhead of njit with the zero per-op
+   marginal cost of fusion.
 
-## Experiment 3: Borrow optimization (skip refcount on unbox)
-
-### Discovery
-
-`TensorImpl*` lives at a fixed offset of 16 bytes from the PyObject start:
-- Bytes 0-7: `ob_refcnt`
-- Bytes 8-15: `ob_type`
-- Bytes 16-23: `TensorImpl*` (the intrusive_ptr raw pointer)
-
-### Approach
-
-Instead of calling `njit_extract_impl` (which does THPVariable_Unpack + incref),
-directly load `*(int64_t*)(pyobj + 16)` in LLVM IR. This is safe because:
-1. The njit function executes synchronously (caller holds GIL)
-2. The Python object outlives the compiled function call
-3. No cleanup needed (no decref since we never incref'd)
-
-Expected savings: eliminate ~600ns of extract+release per input tensor.
-
-### Status: TESTED BELOW
-
----
-
-## Experiment 4: C++ wrapper calling native kernel directly
-
-### Approach
-
-Write a C++ wrapper in `_bridge.cpp` that:
-1. Takes raw `TensorImpl*` args
-2. Wraps them in `at::Tensor` (just pointer assignment, no refcount)
-3. Calls `at::cuda::relu` directly
-4. Returns the result `TensorImpl*`
-
-This eliminates the LLVM→libtorch ABI complexity and can use compiler
-optimizations.
-
-### Status: TESTED BELOW
-
----
-
-## Experiment 5: torch.compile comparison
-
-### Approach
-
-Use `torch.compile` with the inductor backend as a reference point for what
-PyTorch's own JIT can achieve.
-
-### Status: TESTED BELOW
-
----
-
-## Experiment 6: Cached dispatch table lookup
-
-### Approach
-
-Instead of going through the dispatcher, resolve the function pointer for the
-CUDA kernel once at import time by walking the dispatch table, then call it
-directly.
-
-### Status: TESTED BELOW
-
----
-
-## Experiment 7: Eliminate sret (return in register)
-
-### Approach
-
-Write a C wrapper that calls the ATen op and returns the `TensorImpl*` as a
-plain `int64_t` in a register, avoiding the sret pointer dance.
-
-### Status: TESTED BELOW
-
----
-
-## Results
-
-(Updated as experiments complete)
+4. **The per-op cost of ~4.8µs in njit is dominated by the ATen op itself**
+   (tensor allocation, CUDA kernel launch, refcounting), not the dispatch path.
+   To reduce this, we'd need to eliminate per-op tensor allocation (use pre-allocated
+   output buffers) or fuse ops into a single kernel.

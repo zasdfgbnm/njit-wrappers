@@ -4,30 +4,70 @@ Measures wall-clock time of launching GPU ops through njit vs plain Python.
 All tensors are tiny (size 4) so GPU compute is negligible — what we measure
 is the CPU dispatch overhead.  No cudaDeviceSynchronize is called.
 
+Produces a table and a plot (saved to benchmarks/overhead_vs_ops.png) showing
+overhead (µs/call) as a function of the number of ops for both njit and eager.
+
 Usage:
     python benchmarks/bench_cpu_overhead.py
 """
 
 import time
 
-import numba
-import torch
+import matplotlib
 
-import njit_wrappers  # noqa: F401 – registers TensorType
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numba  # noqa: E402
+import torch  # noqa: E402
+
+import njit_wrappers  # noqa: F401, E402 – registers TensorType
 
 # ---------------------------------------------------------------------------
-# Computation graph: a 20-op chain that exercises many op types
+# Computation graphs at varying op counts
 #
-#   layer 1:  h = relu(x @ w1 + b1)            3 ops
-#   layer 2:  h = sigmoid(h @ w2 + b2)         3 ops
-#   trig:     t = sin(h) * cos(h) + tan(h)     4 ops
-#   nonlin:   u = exp(t) - sqrt(abs(t))         4 ops
-#   final:    o = tanh(u / (u + u))             3 ops
-#   reduce:   s = sum(o) + mean(o)              3 ops  → 20 ops total
+# Each function builds on the previous one, adding more ops.
+# The op counts correspond to cumulative stages:
+#
+#   3 ops:  layer 1  — relu(x @ w1 + b1)
+#   6 ops:  + layer 2 — sigmoid(h @ w2 + b2)
+#  10 ops:  + trig    — sin(h) * cos(h) + tan(h)
+#  14 ops:  + nonlin  — exp(t) - sqrt(abs(t))
+#  17 ops:  + final   — tanh(u / (u + u))
+#  20 ops:  + reduce  — sum(o) + mean(o)
 # ---------------------------------------------------------------------------
 
 
-def graph_eager(x, w1, b1, w2, b2):
+def graph_3(x, w1, b1, w2, b2):
+    return torch.relu(x @ w1 + b1)
+
+
+def graph_6(x, w1, b1, w2, b2):
+    h = torch.relu(x @ w1 + b1)
+    return torch.sigmoid(h @ w2 + b2)
+
+
+def graph_10(x, w1, b1, w2, b2):
+    h = torch.relu(x @ w1 + b1)
+    h = torch.sigmoid(h @ w2 + b2)
+    return torch.sin(h) * torch.cos(h) + torch.tan(h)
+
+
+def graph_14(x, w1, b1, w2, b2):
+    h = torch.relu(x @ w1 + b1)
+    h = torch.sigmoid(h @ w2 + b2)
+    t = torch.sin(h) * torch.cos(h) + torch.tan(h)
+    return torch.exp(t) - torch.sqrt(torch.abs(t))
+
+
+def graph_17(x, w1, b1, w2, b2):
+    h = torch.relu(x @ w1 + b1)
+    h = torch.sigmoid(h @ w2 + b2)
+    t = torch.sin(h) * torch.cos(h) + torch.tan(h)
+    u = torch.exp(t) - torch.sqrt(torch.abs(t))
+    return torch.tanh(u / (u + u))
+
+
+def graph_20(x, w1, b1, w2, b2):
     h = torch.relu(x @ w1 + b1)
     h = torch.sigmoid(h @ w2 + b2)
     t = torch.sin(h) * torch.cos(h) + torch.tan(h)
@@ -36,8 +76,14 @@ def graph_eager(x, w1, b1, w2, b2):
     return torch.sum(o) + torch.mean(o)
 
 
-graph_njit = numba.njit(graph_eager)
-
+GRAPHS = [
+    (3, graph_3),
+    (6, graph_6),
+    (10, graph_10),
+    (14, graph_14),
+    (17, graph_17),
+    (20, graph_20),
+]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -79,16 +125,48 @@ def main():
     device = torch.device("cuda")
     args = make_inputs(device)
 
-    # Trigger njit compilation (not timed)
-    graph_njit(*args)
+    op_counts = []
+    times_njit = []
+    times_eager = []
 
-    t_njit = bench(graph_njit, args)
-    t_eager = bench(graph_eager, args)
+    for n_ops, graph_fn in GRAPHS:
+        graph_fn_njit = numba.njit(graph_fn)
+        # Trigger njit compilation (not timed)
+        graph_fn_njit(*args)
 
-    print(f"20-op graph on CUDA tiny tensors (4×4), {ITERS} iterations")
-    print(f"  njit:  {t_njit:8.2f} µs/call")
-    print(f"  eager: {t_eager:8.2f} µs/call")
-    print(f"  ratio: {t_eager / t_njit:8.2f}× (eager / njit)")
+        t_njit = bench(graph_fn_njit, args)
+        t_eager = bench(graph_fn, args)
+
+        op_counts.append(n_ops)
+        times_njit.append(t_njit)
+        times_eager.append(t_eager)
+
+    # -- Table --
+    print(f"CPU overhead on CUDA tiny tensors (4×4), {ITERS} iterations")
+    print()
+    print(f"{'Ops':>4}  {'njit (µs)':>10}  {'eager (µs)':>11}  {'ratio':>6}")
+    print(f"{'----':>4}  {'----------':>10}  {'-----------':>11}  {'------':>6}")
+    for i, n_ops in enumerate(op_counts):
+        ratio = times_eager[i] / times_njit[i]
+        print(
+            f"{n_ops:4d}  {times_njit[i]:10.2f}  {times_eager[i]:11.2f}  {ratio:6.2f}×"
+        )
+
+    # -- Plot --
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(op_counts, times_eager, "o-", label="eager", linewidth=2, markersize=6)
+    ax.plot(op_counts, times_njit, "s-", label="njit", linewidth=2, markersize=6)
+    ax.set_xlabel("Number of ops")
+    ax.set_ylabel("Overhead (µs/call)")
+    ax.set_title("CPU Dispatch Overhead: njit vs Eager PyTorch")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_xticks(op_counts)
+
+    plot_path = "benchmarks/overhead_vs_ops.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"\nPlot saved to {plot_path}")
 
 
 if __name__ == "__main__":

@@ -107,6 +107,19 @@ def bench(fn, args, warmup=WARMUP, iters=ITERS):
     return elapsed / iters * 1e6  # → µs
 
 
+def _robust_polyfit(xs, ys, threshold=2.0):
+    """Fit y = k*x + b, removing outliers whose residual exceeds *threshold* σ.
+
+    Performs an initial fit, computes residuals, discards points beyond
+    *threshold* standard deviations, then refits on the clean data.
+    """
+    k, b = np.polyfit(xs, ys, 1)
+    residuals = ys - (k * xs + b)
+    std = np.std(residuals)
+    mask = np.abs(residuals) <= threshold * std
+    return np.polyfit(xs[mask], ys[mask], 1)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -137,13 +150,13 @@ def main():
 
         print(f"  ops={n_ops:3d}  njit={t_njit:8.2f} µs  eager={t_eager:8.2f} µs")
 
-    # -- Linear fits: y = k*x + b --
+    # -- Linear fits: y = k*x + b (with outlier removal) --
     xs = np.array(op_counts, dtype=np.float64)
     ys_njit = np.array(times_njit, dtype=np.float64)
     ys_eager = np.array(times_eager, dtype=np.float64)
 
-    k_njit, b_njit = np.polyfit(xs, ys_njit, 1)
-    k_eager, b_eager = np.polyfit(xs, ys_eager, 1)
+    k_njit, b_njit = _robust_polyfit(xs, ys_njit)
+    k_eager, b_eager = _robust_polyfit(xs, ys_eager)
 
     print("\nLinear fit  y = k*x + b")
     print(f"  njit:   k = {k_njit:.4f} µs/op,  b = {b_njit:.4f} µs")

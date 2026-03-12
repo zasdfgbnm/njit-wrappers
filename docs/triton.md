@@ -5,7 +5,7 @@ with zero Python overhead.  `NumbaTritonKernel` compiles a Triton kernel
 for a fixed type signature, generates a thin C trampoline that calls
 `cuLaunchKernelEx` directly, and wraps it in an `@numba.njit` function.
 
-```python
+```python notest
 import numba
 import torch
 import triton

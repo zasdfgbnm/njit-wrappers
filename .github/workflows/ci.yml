@@ -21,7 +21,7 @@ jobs:
         run: pip install torch --extra-index-url https://download.pytorch.org/whl/cpu && pip install numba
 
       - name: Install dev dependencies
-        run: pip install pytest pytest-cov pyright ruff
+        run: pip install pytest pytest-cov pytest-markdown-docs pyright ruff mkdocs-material
 
       - name: Install clang-format
         run: sudo apt-get install -y clang-format
@@ -43,6 +43,12 @@ jobs:
 
       - name: Test (pytest)
         run: PYTHONPATH=src pytest --cov --cov-report=xml
+
+      - name: Docs build
+        run: mkdocs build --strict
+
+      - name: Doc examples
+        run: PYTHONPATH=src pytest --markdown-docs docs/
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5

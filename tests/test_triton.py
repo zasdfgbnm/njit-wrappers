@@ -1,40 +1,29 @@
-"""Tests for Triton + Numba integration via NumbaTritonKernel."""
+"""Tests for Triton + Numba integration via NumbaTritonKernel.
+
+The entire module is skipped when triton is not installed or CUDA is
+unavailable, so the module-level ``@triton.jit`` decorators never execute
+on CPU-only CI runners.
+"""
 
 import pytest
 import torch
-import triton
-import triton.language as tl
 
-from njit_wrappers import NumbaTritonKernel
+_has_cuda = torch.cuda.is_available()
 
+try:
+    import triton  # noqa: F401
 
-def _has_cuda():
-    return torch.cuda.is_available()
+    _has_triton = True
+except ImportError:
+    _has_triton = False
 
+if not (_has_cuda and _has_triton):
+    pytest.skip("Requires CUDA and triton", allow_module_level=True)
 
-def _has_numba():
-    try:
-        import numba  # noqa: F401
+import triton  # noqa: E402, F811
+import triton.language as tl  # noqa: E402
 
-        return True
-    except ImportError:
-        return False
-
-
-def _has_triton():
-    try:
-        import triton as _triton  # noqa: F811
-
-        del _triton
-        return True
-    except ImportError:
-        return False
-
-
-requires_cuda_numba_triton = pytest.mark.skipif(
-    not (_has_cuda() and _has_numba() and _has_triton()),
-    reason="Requires CUDA, numba, and triton",
-)
+from njit_wrappers import NumbaTritonKernel  # noqa: E402
 
 
 @triton.jit
@@ -56,7 +45,6 @@ def scale_kernel(x_ptr, out_ptr, n_elements, scale, BLOCK_SIZE: tl.constexpr):
     tl.store(out_ptr + offs, x * scale, mask=mask)
 
 
-@requires_cuda_numba_triton
 def test_vector_add_basic():
     """Test basic vector add via numba.njit launch."""
     import numba
@@ -91,7 +79,6 @@ def test_vector_add_basic():
     assert torch.allclose(out, x + y), f"max diff: {(out - x - y).abs().max().item()}"
 
 
-@requires_cuda_numba_triton
 def test_vector_add_large():
     """Test vector add with multiple blocks."""
     import numba
@@ -128,7 +115,6 @@ def test_vector_add_large():
     )
 
 
-@requires_cuda_numba_triton
 def test_mixed_types():
     """Test kernel with mixed pointer and scalar types."""
     import numba
@@ -166,7 +152,6 @@ def test_mixed_types():
     )
 
 
-@requires_cuda_numba_triton
 def test_numba_kernel_matches_expected():
     """Verify numba launch produces correct results matching expected output."""
     import numba
@@ -204,7 +189,6 @@ def test_numba_kernel_matches_expected():
     )
 
 
-@requires_cuda_numba_triton
 def test_empty_grid():
     """Test that an empty grid (n=0) doesn't crash."""
     import numba
@@ -238,7 +222,6 @@ def test_empty_grid():
     torch.cuda.synchronize()
 
 
-@requires_cuda_numba_triton
 def test_specialization_variant_count():
     """Verify that 2^K variants are compiled for K specializable args."""
     numba_add = NumbaTritonKernel(
@@ -263,7 +246,6 @@ def test_specialization_variant_count():
     )
 
 
-@requires_cuda_numba_triton
 def test_specialization_correctness_aligned():
     """Test that the aligned variant produces correct results."""
     import numba
@@ -299,7 +281,6 @@ def test_specialization_correctness_aligned():
     assert torch.allclose(out, x + y), f"max diff: {(out - x - y).abs().max().item()}"
 
 
-@requires_cuda_numba_triton
 def test_specialization_correctness_unaligned():
     """Test that the unaligned variant produces correct results."""
     import numba
@@ -335,7 +316,6 @@ def test_specialization_correctness_unaligned():
     assert torch.allclose(out, x + y), f"max diff: {(out - x - y).abs().max().item()}"
 
 
-@requires_cuda_numba_triton
 def test_non_specializable_float_arg():
     """Test that float args are not included in specialization bitmask."""
     numba_scale = NumbaTritonKernel(

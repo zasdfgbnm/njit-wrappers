@@ -3,7 +3,7 @@
 Mix regular torch operations with custom Triton kernels inside a single
 `@numba.njit` function — zero Python overhead for the entire pipeline.
 
-```python
+```python notest
 import numba
 import torch
 import triton

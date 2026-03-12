@@ -1,17 +1,20 @@
 """Benchmark CPU-side overhead of njit-wrapped ATen calls on CUDA tensors.
 
 Measures wall-clock time of launching GPU ops through njit vs plain Python.
-All tensors are tiny (size 4) so GPU compute is negligible — what we measure
+All tensors are tiny (4×4) so GPU compute is negligible — what we measure
 is the CPU dispatch overhead.  No cudaDeviceSynchronize is called.
 
-Produces a table and a plot (saved to benchmarks/eager-vs-njit/overhead_vs_ops.png)
-showing overhead (µs/call) as a function of the number of ops for both njit and
-eager.
+Each graph is simply ``for i in range(N): x = torch.relu(x)`` so the only
+variable is the number of ops.
+
+Produces a plot (overhead_vs_ops.png) and a README.md in the same directory.
 
 Usage:
     python benchmarks/eager-vs-njit/run.py
 """
 
+import platform
+import subprocess
 import time
 from pathlib import Path
 
@@ -27,67 +30,61 @@ import njit_wrappers  # noqa: F401, E402 – registers TensorType
 OUT_DIR = Path(__file__).resolve().parent
 
 # ---------------------------------------------------------------------------
-# Computation graphs at varying op counts
+# Graph builders — ``for i in range(N): x = torch.relu(x)``
 #
-# Each function builds on the previous one, adding more ops.
-# The op counts correspond to cumulative stages:
-#
-#   3 ops:  layer 1  — relu(x @ w1 + b1)
-#   6 ops:  + layer 2 — sigmoid(h @ w2 + b2)
-#  10 ops:  + trig    — sin(h) * cos(h) + tan(h)
-#  14 ops:  + nonlin  — exp(t) - sqrt(abs(t))
-#  17 ops:  + final   — tanh(u / (u + u))
-#  20 ops:  + reduce  — sum(o) + mean(o)
+# Numba's njit does not support Python-level for-loops over torch tensors,
+# so we generate a dedicated function for each op count.
+# ---------------------------------------------------------------------------
+
+OP_COUNTS = [1, 2, 4, 8, 16, 32, 64]
+
+
+def _make_graph(n_ops):
+    """Return an eager function that applies torch.relu *n_ops* times."""
+    body = "\n".join("    x = torch.relu(x)" for _ in range(n_ops))
+    src = f"def _graph(x):\n{body}\n    return x"
+    ns = {"torch": torch}
+    exec(src, ns)  # noqa: S102
+    return ns["_graph"]
+
+
+# ---------------------------------------------------------------------------
+# Environment collection
 # ---------------------------------------------------------------------------
 
 
-def graph_3(x, w1, b1, w2, b2):
-    return torch.relu(x @ w1 + b1)
+def _collect_env():
+    """Collect benchmark environment info as an ordered dict."""
+    info = {}
 
+    info["CPU"] = platform.processor() or platform.machine()
+    info["GPU"] = torch.cuda.get_device_name(0)
+    info["CUDA"] = torch.version.cuda or "N/A"
 
-def graph_6(x, w1, b1, w2, b2):
-    h = torch.relu(x @ w1 + b1)
-    return torch.sigmoid(h @ w2 + b2)
+    try:
+        driver = (
+            subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=driver_version",
+                    "--format=csv,noheader",
+                ],
+                text=True,
+            )
+            .strip()
+            .split("\n")[0]
+        )
+    except Exception:
+        driver = "N/A"
+    info["Driver"] = driver
 
+    info["Python"] = platform.python_version()
+    info["PyTorch"] = torch.__version__
+    info["Numba"] = numba.__version__
+    info["OS"] = platform.platform()
 
-def graph_10(x, w1, b1, w2, b2):
-    h = torch.relu(x @ w1 + b1)
-    h = torch.sigmoid(h @ w2 + b2)
-    return torch.sin(h) * torch.cos(h) + torch.tan(h)
+    return info
 
-
-def graph_14(x, w1, b1, w2, b2):
-    h = torch.relu(x @ w1 + b1)
-    h = torch.sigmoid(h @ w2 + b2)
-    t = torch.sin(h) * torch.cos(h) + torch.tan(h)
-    return torch.exp(t) - torch.sqrt(torch.abs(t))
-
-
-def graph_17(x, w1, b1, w2, b2):
-    h = torch.relu(x @ w1 + b1)
-    h = torch.sigmoid(h @ w2 + b2)
-    t = torch.sin(h) * torch.cos(h) + torch.tan(h)
-    u = torch.exp(t) - torch.sqrt(torch.abs(t))
-    return torch.tanh(u / (u + u))
-
-
-def graph_20(x, w1, b1, w2, b2):
-    h = torch.relu(x @ w1 + b1)
-    h = torch.sigmoid(h @ w2 + b2)
-    t = torch.sin(h) * torch.cos(h) + torch.tan(h)
-    u = torch.exp(t) - torch.sqrt(torch.abs(t))
-    o = torch.tanh(u / (u + u))
-    return torch.sum(o) + torch.mean(o)
-
-
-GRAPHS = [
-    (3, graph_3),
-    (6, graph_6),
-    (10, graph_10),
-    (14, graph_14),
-    (17, graph_17),
-    (20, graph_20),
-]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -95,17 +92,6 @@ GRAPHS = [
 
 WARMUP = 50
 ITERS = 1000
-
-
-def make_inputs(device: torch.device):
-    """Create tiny tensors for the benchmark graph."""
-    torch.manual_seed(0)
-    x = torch.randn(4, 4, device=device)
-    w1 = torch.randn(4, 4, device=device)
-    b1 = torch.randn(4, device=device)
-    w2 = torch.randn(4, 4, device=device)
-    b2 = torch.randn(4, device=device)
-    return x, w1, b1, w2, b2
 
 
 def bench(fn, args, warmup=WARMUP, iters=ITERS):
@@ -127,48 +113,40 @@ def bench(fn, args, warmup=WARMUP, iters=ITERS):
 def main():
     assert torch.cuda.is_available(), "This benchmark requires a CUDA GPU."
     device = torch.device("cuda")
-    args = make_inputs(device)
+    torch.manual_seed(0)
+    x = torch.randn(4, 4, device=device)
 
     op_counts = []
     times_njit = []
     times_eager = []
 
-    for n_ops, graph_fn in GRAPHS:
+    for n_ops in OP_COUNTS:
+        graph_fn = _make_graph(n_ops)
         graph_fn_njit = numba.njit(graph_fn)
         # Trigger njit compilation (not timed)
-        graph_fn_njit(*args)
+        graph_fn_njit(x)
 
-        t_njit = bench(graph_fn_njit, args)
-        t_eager = bench(graph_fn, args)
+        t_njit = bench(graph_fn_njit, (x,))
+        t_eager = bench(graph_fn, (x,))
 
         op_counts.append(n_ops)
         times_njit.append(t_njit)
         times_eager.append(t_eager)
 
-    # -- Table --
-    table_lines = []
-    table_lines.append(f"CPU overhead on CUDA tiny tensors (4×4), {ITERS} iterations")
-    table_lines.append("")
-    table_lines.append(
-        f"{'Ops':>4}  {'njit (µs)':>10}  {'eager (µs)':>11}  {'ratio':>6}"
-    )
-    table_lines.append(
-        f"{'----':>4}  {'----------':>10}  {'-----------':>11}  {'------':>6}"
-    )
+    # -- Console table --
+    print(f"CPU overhead on CUDA tiny tensors (4×4), {ITERS} iterations\n")
+    print(f"{'Ops':>4}  {'njit (µs)':>10}  {'eager (µs)':>11}  {'ratio':>6}")
+    print(f"{'----':>4}  {'----------':>10}  {'-----------':>11}  {'------':>6}")
     for i, n_ops in enumerate(op_counts):
         ratio = times_eager[i] / times_njit[i]
-        table_lines.append(
+        print(
             f"{n_ops:4d}  {times_njit[i]:10.2f}  {times_eager[i]:11.2f}  {ratio:6.2f}×"
         )
 
-    table_text = "\n".join(table_lines)
-    print(table_text)
-
-    table_path = OUT_DIR / "results.txt"
-    table_path.write_text(table_text + "\n")
-    print(f"\nTable saved to {table_path}")
-
     # -- Plot --
+    plot_name = "overhead_vs_ops.png"
+    plot_path = OUT_DIR / plot_name
+
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(op_counts, times_eager, "o-", label="eager", linewidth=2, markersize=6)
     ax.plot(op_counts, times_njit, "s-", label="njit", linewidth=2, markersize=6)
@@ -179,10 +157,58 @@ def main():
     ax.grid(True, alpha=0.3)
     ax.set_xticks(op_counts)
 
-    plot_path = OUT_DIR / "overhead_vs_ops.png"
     fig.savefig(str(plot_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"Plot saved to {plot_path}")
+    print(f"\nPlot saved to {plot_path}")
+
+    # -- README.md --
+    readme_path = OUT_DIR / "README.md"
+    env_info = _collect_env()
+
+    md_table_rows = []
+    for i, n_ops in enumerate(op_counts):
+        ratio = times_eager[i] / times_njit[i]
+        md_table_rows.append(
+            f"| {n_ops} | {times_njit[i]:.2f} | {times_eager[i]:.2f} | {ratio:.2f}× |"
+        )
+    md_table = "\n".join(md_table_rows)
+
+    env_table_rows = "\n".join(f"| {k} | {v} |" for k, v in env_info.items())
+
+    readme = f"""\
+# Eager vs njit: CPU Dispatch Overhead
+
+Measures wall-clock time of launching GPU ops through `numba.njit` vs plain
+eager PyTorch.  All tensors are tiny (4×4) so GPU compute is negligible — only
+the CPU dispatch overhead is measured.  No `cudaDeviceSynchronize` is called.
+
+Each graph is simply `for i in range(N): x = torch.relu(x)`.
+
+## Results
+
+![overhead_vs_ops]({plot_name})
+
+| Ops | njit (µs) | eager (µs) | ratio |
+|-----|-----------|------------|-------|
+{md_table}
+
+> {ITERS} iterations per data point, {WARMUP} warmup iterations.
+
+## Benchmark environment
+
+| Component | Details |
+|-----------|---------|
+{env_table_rows}
+
+## Running
+
+```bash
+PYTHONPATH=src python benchmarks/eager-vs-njit/run.py
+```
+"""
+
+    readme_path.write_text(readme)
+    print(f"README saved to {readme_path}")
 
 
 if __name__ == "__main__":

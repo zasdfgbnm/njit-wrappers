@@ -47,6 +47,10 @@ out = mlp_forward(x, w1, b1, w2, b2)
 `torch.tan`, `torch.abs`, `torch.relu`, `torch.sigmoid`, `torch.tanh`,
 `torch.nn.functional.silu`, `torch.sum`, `torch.mean`
 
+### Tensor methods
+
+`tensor.numel()`
+
 ## Known limitation
 
 Intermediate tensors that are computed inside an njit function but

@@ -32,7 +32,8 @@ numba_add = NumbaTritonKernel(
 launch_add = numba_add.launch  # extract the @njit function
 
 @numba.njit
-def f(x, y, out, n, stream):
+def f(x, y, out, stream):
+    n = x.numel()
     grid = (n + 1023) // 1024
     launch_add(grid, 1, 1, stream, x, y, out, n)
 
@@ -42,7 +43,7 @@ y = torch.randn(n, device='cuda', dtype=torch.float32)
 out = torch.empty_like(x)
 stream = torch.cuda.current_stream().cuda_stream
 
-f(x, y, out, n, stream)  # pass tensors directly
+f(x, y, out, stream)  # pass tensors directly
 torch.cuda.synchronize()
 assert torch.allclose(out, x + y)
 ```

@@ -477,3 +477,28 @@ def test_elementwise_shape_preserved(shape):
     b = torch.randn(*shape)
     assert add(a, b).shape == shape
     assert mul(a, b).shape == shape
+
+
+# ---------------------------------------------------------------------------
+# Tensor methods
+# ---------------------------------------------------------------------------
+
+
+@numba.njit
+def numel(a):
+    return a.numel()
+
+
+def test_numel_1d():
+    a = torch.ones(7)
+    assert numel(a) == 7
+
+
+def test_numel_2d():
+    a = torch.zeros(3, 4)
+    assert numel(a) == 12
+
+
+def test_numel_scalar():
+    a = torch.tensor(1.0)
+    assert numel(a) == 1

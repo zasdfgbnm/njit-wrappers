@@ -58,6 +58,7 @@ from numba.core.extending import (
     box,
     intrinsic,
     overload,
+    overload_method,
     register_model,
     typeof_impl,
     unbox,
@@ -170,6 +171,11 @@ _ATEN_OPS: list[tuple[str, str, str, str]] = [
 
 for _name, _args, _llvm_sym, _cc in _ATEN_OPS:
     llvm.add_symbol(_llvm_sym, _fn_addr(_TORCH_LIB, _mangle_aten(_name, _args)))
+
+# aoti_torch_get_numel is a C function exported by libtorch_cpu.so:
+#   int32_t aoti_torch_get_numel(AtenTensorHandle tensor, int64_t* ret_numel)
+# AtenTensorHandle is an opaque pointer compatible with TensorImpl*.
+llvm.add_symbol("aoti_torch_get_numel", _fn_addr(_TORCH_LIB, "aoti_torch_get_numel"))
 
 # ---------------------------------------------------------------------------
 # Numba type system
@@ -467,6 +473,37 @@ def _tensor_data_ptr(typingctx, a):
 
 
 # ---------------------------------------------------------------------------
+# Tensor numel (via aoti_torch_get_numel from libtorch_cpu.so)
+# ---------------------------------------------------------------------------
+
+
+@intrinsic
+def _tensor_numel(typingctx, a):
+    """Return the number of elements in a TensorType as int64."""
+    if not isinstance(a, TensorType):
+        return None
+    sig = types.int64(tensor_type)
+
+    def codegen(context, builder, signature, args):
+        i64 = ir.IntType(64)
+        i32 = ir.IntType(32)
+        i8p = ir.IntType(8).as_pointer()
+        # aoti_torch_get_numel(AtenTensorHandle tensor, int64_t* ret_numel)
+        # AtenTensorHandle is at::Tensor* (pointer to 8-byte TensorImpl*),
+        # so we spill the i64 handle onto the stack and pass its address.
+        fn = cgutils.get_or_insert_function(
+            builder.module,
+            ir.FunctionType(i32, [i8p, i64.as_pointer()]),
+            "aoti_torch_get_numel",
+        )
+        out = builder.alloca(i64)
+        builder.call(fn, [_tensor_slot(builder, args[0]), out])
+        return builder.load(out)
+
+    return sig, codegen
+
+
+# ---------------------------------------------------------------------------
 # Operator overloads
 # ---------------------------------------------------------------------------
 
@@ -744,3 +781,16 @@ def overload_torch_mean(a):
             return _tensor_mean(a)  # type: ignore[call-arg]
 
         return impl
+
+
+# ---------------------------------------------------------------------------
+# Tensor method overloads
+# ---------------------------------------------------------------------------
+
+
+@overload_method(TensorType, "numel")
+def overload_tensor_numel(self):
+    def impl(self):
+        return _tensor_numel(self)  # type: ignore[call-arg]
+
+    return impl

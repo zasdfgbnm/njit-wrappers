@@ -15,8 +15,13 @@ The `/check` skill walks through each step and tells you how to fix failures as 
 
 ## CI checks (what `/check` runs)
 
+> **Keep this table in sync with `.github/workflows/ci.yml`.** If you add, remove, or modify a
+> CI step in the workflow file, update this table too — and vice versa. The two must always be
+> consistent.
+
 | Step | Command |
 |------|---------|
+| C++ format (clang-format) | `find src -name '*.cpp' -o -name '*.h' -o -name '*.cc' -o -name '*.cxx' \| xargs clang-format --dry-run --Werror` |
 | Lint | `ruff check .` |
 | Format | `ruff format --check .` |
 | Type check | `PYTHONPATH=src pyright src/` |

@@ -73,10 +73,6 @@ _bridge_lib = ctypes.CDLL(_bridge_module.__file__)
 
 _bridge_lib.njit_borrow_impl.restype = ctypes.c_int64
 _bridge_lib.njit_borrow_impl.argtypes = [ctypes.py_object]
-_bridge_lib.njit_extract_impl.restype = ctypes.c_int64
-_bridge_lib.njit_extract_impl.argtypes = [ctypes.py_object]
-_bridge_lib.njit_release_impl.restype = None
-_bridge_lib.njit_release_impl.argtypes = [ctypes.c_int64]
 _bridge_lib.njit_wrap_impl.restype = ctypes.py_object
 _bridge_lib.njit_wrap_impl.argtypes = [ctypes.c_int64]
 
@@ -89,8 +85,6 @@ def _fn_addr(lib: ctypes.CDLL, mangled: str) -> int:
 
 
 llvm.add_symbol("njit_borrow_impl", _fn_addr(_bridge_lib, "njit_borrow_impl"))
-llvm.add_symbol("njit_extract_impl", _fn_addr(_bridge_lib, "njit_extract_impl"))
-llvm.add_symbol("njit_release_impl", _fn_addr(_bridge_lib, "njit_release_impl"))
 llvm.add_symbol("njit_wrap_impl", _fn_addr(_bridge_lib, "njit_wrap_impl"))
 
 # ---------------------------------------------------------------------------

@@ -4,14 +4,16 @@ Measures wall-clock time of launching GPU ops through njit vs plain Python.
 All tensors are tiny (size 4) so GPU compute is negligible — what we measure
 is the CPU dispatch overhead.  No cudaDeviceSynchronize is called.
 
-Produces a table and a plot (saved to benchmarks/overhead_vs_ops.png) showing
-overhead (µs/call) as a function of the number of ops for both njit and eager.
+Produces a table and a plot (saved to benchmarks/eager-vs-njit/overhead_vs_ops.png)
+showing overhead (µs/call) as a function of the number of ops for both njit and
+eager.
 
 Usage:
-    python benchmarks/bench_cpu_overhead.py
+    python benchmarks/eager-vs-njit/run.py
 """
 
 import time
+from pathlib import Path
 
 import matplotlib
 
@@ -21,6 +23,8 @@ import numba  # noqa: E402
 import torch  # noqa: E402
 
 import njit_wrappers  # noqa: F401, E402 – registers TensorType
+
+OUT_DIR = Path(__file__).resolve().parent
 
 # ---------------------------------------------------------------------------
 # Computation graphs at varying op counts
@@ -142,15 +146,27 @@ def main():
         times_eager.append(t_eager)
 
     # -- Table --
-    print(f"CPU overhead on CUDA tiny tensors (4×4), {ITERS} iterations")
-    print()
-    print(f"{'Ops':>4}  {'njit (µs)':>10}  {'eager (µs)':>11}  {'ratio':>6}")
-    print(f"{'----':>4}  {'----------':>10}  {'-----------':>11}  {'------':>6}")
+    table_lines = []
+    table_lines.append(f"CPU overhead on CUDA tiny tensors (4×4), {ITERS} iterations")
+    table_lines.append("")
+    table_lines.append(
+        f"{'Ops':>4}  {'njit (µs)':>10}  {'eager (µs)':>11}  {'ratio':>6}"
+    )
+    table_lines.append(
+        f"{'----':>4}  {'----------':>10}  {'-----------':>11}  {'------':>6}"
+    )
     for i, n_ops in enumerate(op_counts):
         ratio = times_eager[i] / times_njit[i]
-        print(
+        table_lines.append(
             f"{n_ops:4d}  {times_njit[i]:10.2f}  {times_eager[i]:11.2f}  {ratio:6.2f}×"
         )
+
+    table_text = "\n".join(table_lines)
+    print(table_text)
+
+    table_path = OUT_DIR / "results.txt"
+    table_path.write_text(table_text + "\n")
+    print(f"\nTable saved to {table_path}")
 
     # -- Plot --
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -163,10 +179,10 @@ def main():
     ax.grid(True, alpha=0.3)
     ax.set_xticks(op_counts)
 
-    plot_path = "benchmarks/overhead_vs_ops.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plot_path = OUT_DIR / "overhead_vs_ops.png"
+    fig.savefig(str(plot_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"\nPlot saved to {plot_path}")
+    print(f"Plot saved to {plot_path}")
 
 
 if __name__ == "__main__":

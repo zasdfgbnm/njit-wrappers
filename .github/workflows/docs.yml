@@ -15,7 +15,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.14"
 
       - name: Install torch and numba
         run: pip install torch --extra-index-url https://download.pytorch.org/whl/cpu && pip install numba
@@ -39,17 +39,31 @@ jobs:
     if: github.event_name == 'push'
 
     permissions:
-      contents: write
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.x"
+          python-version: "3.14"
 
       - name: Install MkDocs
         run: pip install mkdocs-material
 
+      - name: Build docs
+        run: mkdocs build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
       - name: Deploy to GitHub Pages
-        run: mkdocs gh-deploy --force
+        id: deployment
+        uses: actions/deploy-pages@v4

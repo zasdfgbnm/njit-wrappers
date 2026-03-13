@@ -58,6 +58,7 @@ from numba.core.extending import (
     box,
     intrinsic,
     overload,
+    overload_method,
     register_model,
     typeof_impl,
     unbox,
@@ -86,6 +87,10 @@ def _fn_addr(lib: ctypes.CDLL, mangled: str) -> int:
 
 llvm.add_symbol("njit_borrow_impl", _fn_addr(_bridge_lib, "njit_borrow_impl"))
 llvm.add_symbol("njit_wrap_impl", _fn_addr(_bridge_lib, "njit_wrap_impl"))
+
+_bridge_lib.njit_data_ptr.restype = ctypes.c_uint64
+_bridge_lib.njit_data_ptr.argtypes = [ctypes.c_int64]
+llvm.add_symbol("njit_data_ptr", _fn_addr(_bridge_lib, "njit_data_ptr"))
 
 # ---------------------------------------------------------------------------
 # ATen symbol resolution via Itanium C++ name mangling computed in Python.
@@ -166,6 +171,11 @@ _ATEN_OPS: list[tuple[str, str, str, str]] = [
 
 for _name, _args, _llvm_sym, _cc in _ATEN_OPS:
     llvm.add_symbol(_llvm_sym, _fn_addr(_TORCH_LIB, _mangle_aten(_name, _args)))
+
+# aoti_torch_get_numel is a C function exported by libtorch_cpu.so:
+#   int32_t aoti_torch_get_numel(AtenTensorHandle tensor, int64_t* ret_numel)
+# AtenTensorHandle is an opaque pointer compatible with TensorImpl*.
+llvm.add_symbol("aoti_torch_get_numel", _fn_addr(_TORCH_LIB, "aoti_torch_get_numel"))
 
 # ---------------------------------------------------------------------------
 # Numba type system
@@ -437,6 +447,61 @@ _tensor_lt = _make_binary_intrinsic("_aten_lt")
 _tensor_le = _make_binary_intrinsic("_aten_le")
 _tensor_gt = _make_binary_intrinsic("_aten_gt")
 _tensor_ge = _make_binary_intrinsic("_aten_ge")
+
+# ---------------------------------------------------------------------------
+# Tensor data pointer extraction (for Triton kernel launches)
+# ---------------------------------------------------------------------------
+
+
+@intrinsic
+def _tensor_data_ptr(typingctx, a):
+    """Extract the raw device pointer from a TensorType as uint64."""
+    if not isinstance(a, TensorType):
+        return None
+    sig = types.uint64(tensor_type)
+
+    def codegen(context, builder, signature, args):
+        i64 = ir.IntType(64)
+        fn = cgutils.get_or_insert_function(
+            builder.module,
+            ir.FunctionType(i64, [i64]),
+            "njit_data_ptr",
+        )
+        return builder.call(fn, [args[0]])
+
+    return sig, codegen
+
+
+# ---------------------------------------------------------------------------
+# Tensor numel (via aoti_torch_get_numel from libtorch_cpu.so)
+# ---------------------------------------------------------------------------
+
+
+@intrinsic
+def _tensor_numel(typingctx, a):
+    """Return the number of elements in a TensorType as int64."""
+    if not isinstance(a, TensorType):
+        return None
+    sig = types.int64(tensor_type)
+
+    def codegen(context, builder, signature, args):
+        i64 = ir.IntType(64)
+        i32 = ir.IntType(32)
+        i8p = ir.IntType(8).as_pointer()
+        # aoti_torch_get_numel(AtenTensorHandle tensor, int64_t* ret_numel)
+        # AtenTensorHandle is at::Tensor* (pointer to 8-byte TensorImpl*),
+        # so we spill the i64 handle onto the stack and pass its address.
+        fn = cgutils.get_or_insert_function(
+            builder.module,
+            ir.FunctionType(i32, [i8p, i64.as_pointer()]),
+            "aoti_torch_get_numel",
+        )
+        out = builder.alloca(i64)
+        builder.call(fn, [_tensor_slot(builder, args[0]), out])
+        return builder.load(out)
+
+    return sig, codegen
+
 
 # ---------------------------------------------------------------------------
 # Operator overloads
@@ -716,3 +781,16 @@ def overload_torch_mean(a):
             return _tensor_mean(a)  # type: ignore[call-arg]
 
         return impl
+
+
+# ---------------------------------------------------------------------------
+# Tensor method overloads
+# ---------------------------------------------------------------------------
+
+
+@overload_method(TensorType, "numel")
+def overload_tensor_numel(self):
+    def impl(self):
+        return _tensor_numel(self)  # type: ignore[call-arg]
+
+    return impl

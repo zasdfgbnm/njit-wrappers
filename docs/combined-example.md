@@ -3,9 +3,12 @@
 Mix regular torch operations with custom Triton kernels inside a single
 `@numba.njit` function — zero Python overhead for the entire pipeline.
 
-```python notest
+```python
+import pytest, torch
+if not torch.cuda.is_available():
+    pytest.skip("Requires CUDA and triton", allow_module_level=True)
+
 import numba
-import torch
 import triton
 import triton.language as tl
 from njit_wrappers import NumbaTritonKernel

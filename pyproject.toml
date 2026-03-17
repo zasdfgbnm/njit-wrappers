@@ -64,8 +64,14 @@ known-first-party = ["njit_wrappers"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
 include = ["src"]
-# _tensor.py and _triton.py use numba/triton internal APIs that ship no type stubs
-ignore = ["src/njit_wrappers/_tensor.py", "src/njit_wrappers/_triton.py"]
+# _tensor.py, _triton.py, _inductor.py, and _inductor_extract.py use numba/triton/ast
+# internal APIs that ship no type stubs or have complex dynamic types
+ignore = [
+    "src/njit_wrappers/_tensor.py",
+    "src/njit_wrappers/_triton.py",
+    "src/njit_wrappers/_inductor.py",
+    "src/njit_wrappers/_inductor_extract.py",
+]
 
 # ── Pytest ────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]

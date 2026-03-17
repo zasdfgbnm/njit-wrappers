@@ -11,4 +11,5 @@ nav:
   - Home: index.md
   - Torch ops: torch-ops.md
   - Triton kernels: triton.md
+  - Inductor graphs: inductor.md
   - Combined example: combined-example.md

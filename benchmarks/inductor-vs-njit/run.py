@@ -1,16 +1,18 @@
-"""Benchmark CPU-side overhead of inductor graph calls: njit vs torch.compile.
+"""Benchmark CPU-side latency of inductor graph calls: njit vs torch.compile.
 
 Measures wall-clock time of running an inductor-compiled graph through
 ``NjitInductorGraph`` vs the standard ``torch.compile`` Python wrapper.
-All tensors are tiny (4×4) so GPU compute is negligible — what we measure
+Tensors are small (32×64) so GPU compute is negligible — what we measure
 is the CPU orchestration overhead (buffer allocation, grid computation,
 kernel launches).  No cudaDeviceSynchronize is called.
 
-The independent variable is the number of fused pointwise ops per graph
-(1 to 64 chained ``torch.relu`` calls).  Each op count produces a
-distinct inductor graph with one or more Triton kernels.
+The independent variable is the **number of Triton kernels** in the graph.
+We use ``torch.softmax`` with alternating dims so that inductor produces
+exactly one kernel per op (softmax is a reduction that cannot be fused
+across different dims).
 
-Produces a plot (overhead_vs_ops.png) and a README.md in the same directory.
+Produces a plot (overhead_vs_kernels.png) and a README.md in the same
+directory.
 
 Usage:
     python benchmarks/inductor-vs-njit/run.py
@@ -32,24 +34,24 @@ import torch  # noqa: E402
 OUT_DIR = Path(__file__).resolve().parent
 
 # ---------------------------------------------------------------------------
-# Graph builders
+# Model that produces exactly N kernels
 # ---------------------------------------------------------------------------
 
-MIN_OPS = 1
-MAX_OPS = 64
+MIN_KERNELS = 1
+MAX_KERNELS = 64
 
 
-class _PointwiseModel(torch.nn.Module):
-    """Model that applies torch.relu *n_ops* times."""
+class _SoftmaxChain(torch.nn.Module):
+    """Chain of N softmax ops with alternating dims → N kernels."""
 
-    def __init__(self, n_ops):
+    def __init__(self, n: int) -> None:
         super().__init__()
-        self.n_ops = n_ops
+        self.n = n
 
-    def forward(self, x, y):
-        out = x + y
-        for _ in range(self.n_ops):
-            out = torch.relu(out)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = x
+        for i in range(self.n):
+            out = torch.softmax(out, dim=i % 2)
         return out
 
 
@@ -146,74 +148,74 @@ def main():
     assert torch.cuda.is_available(), "This benchmark requires a CUDA GPU."
     device = torch.device("cuda")
     torch.manual_seed(0)
-    x = torch.randn(4, 4, device=device)
-    y = torch.randn(4, 4, device=device)
+    x = torch.randn(32, 64, device=device)
 
-    op_counts = []
+    kernel_counts = []
     times_njit = []
     times_compile = []
 
-    for n_ops in range(MIN_OPS, MAX_OPS + 1):
-        model = _PointwiseModel(n_ops).cuda()
+    for n in range(MIN_KERNELS, MAX_KERNELS + 1):
+        model = _SoftmaxChain(n).cuda()
 
         # Build NjitInductorGraph (resets dynamo internally)
-        njit_graph = NjitInductorGraph(model, (x, y))
+        njit_graph = NjitInductorGraph(model, (x,))
 
         # Build standard torch.compile graph
         torch._dynamo.reset()
         compiled = torch.compile(model, backend="inductor", fullgraph=True)
-        compiled(x, y)  # trigger compilation
+        compiled(x)  # trigger compilation
 
-        t_njit = bench(njit_graph, (x, y))
-        t_compile = bench(compiled, (x, y))
+        t_njit = bench(njit_graph, (x,))
+        t_compile = bench(compiled, (x,))
 
-        op_counts.append(n_ops)
+        kernel_counts.append(n)
         times_njit.append(t_njit)
         times_compile.append(t_compile)
 
-        print(f"  ops={n_ops:3d}  njit={t_njit:8.2f} µs  compile={t_compile:8.2f} µs")
+        print(f"  kernels={n:3d}  njit={t_njit:8.2f} µs  compile={t_compile:8.2f} µs")
 
     # -- Linear fits (with outlier removal) --
     #   njit:    y = k*x + b  (free intercept — fixed njit overhead)
-    #   compile: y = k*x      (forced through origin — baseline)
-    xs = np.array(op_counts, dtype=np.float64)
+    #   compile: y = k*x + b  (free intercept — fixed torch.compile overhead)
+    xs = np.array(kernel_counts, dtype=np.float64)
     ys_njit = np.array(times_njit, dtype=np.float64)
     ys_compile = np.array(times_compile, dtype=np.float64)
 
     k_njit, b_njit = _robust_polyfit(xs, ys_njit)
-    k_compile = _robust_fit_through_origin(xs, ys_compile)
+    k_compile, b_compile = _robust_polyfit(xs, ys_compile)
 
     print("\nLinear fit (outliers removed)")
     print(f"  njit:    y = {k_njit:.4f}x + {b_njit:.4f}  (µs)")
-    print(f"  compile: y = {k_compile:.4f}x           (µs, b forced to 0)")
+    print(f"  compile: y = {k_compile:.4f}x + {b_compile:.4f}  (µs)")
 
     # -- Console table --
     print(
-        f"\nCPU overhead for inductor graphs on tiny CUDA tensors (4×4),"
-        f" {ITERS} iterations\n"
+        f"\nCPU latency for inductor graphs (32×64 CUDA tensors), {ITERS} iterations\n"
     )
-    print(f"{'Ops':>4}  {'njit (µs)':>10}  {'compile (µs)':>13}")
-    print(f"{'----':>4}  {'----------':>10}  {'-------------':>13}")
-    for i, n_ops in enumerate(op_counts):
-        print(f"{n_ops:4d}  {times_njit[i]:10.2f}  {times_compile[i]:13.2f}")
+    print(f"{'Kernels':>7}  {'njit (µs)':>10}  {'compile (µs)':>13}")
+    print(f"{'-------':>7}  {'----------':>10}  {'-------------':>13}")
+    for i, n in enumerate(kernel_counts):
+        print(f"{n:7d}  {times_njit[i]:10.2f}  {times_compile[i]:13.2f}")
 
     # -- Plot --
-    plot_name = "overhead_vs_ops.png"
+    plot_name = "overhead_vs_kernels.png"
     plot_path = OUT_DIR / plot_name
 
-    fit_xs = np.linspace(MIN_OPS, MAX_OPS, 200)
+    fit_xs = np.linspace(MIN_KERNELS, MAX_KERNELS, 200)
     fit_njit = k_njit * fit_xs + b_njit
-    fit_compile = k_compile * fit_xs
+    fit_compile = k_compile * fit_xs + b_compile
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.scatter(op_counts, times_compile, s=12, alpha=0.5, label="torch.compile (data)")
-    ax.scatter(op_counts, times_njit, s=12, alpha=0.5, label="njit (data)")
+    ax.scatter(
+        kernel_counts, times_compile, s=12, alpha=0.5, label="torch.compile (data)"
+    )
+    ax.scatter(kernel_counts, times_njit, s=12, alpha=0.5, label="njit (data)")
     ax.plot(
         fit_xs,
         fit_compile,
         "-",
         linewidth=2,
-        label=f"compile fit: y = {k_compile:.2f}x",
+        label=f"compile fit: y = {k_compile:.2f}x + {b_compile:.2f}",
     )
     ax.plot(
         fit_xs,
@@ -222,9 +224,9 @@ def main():
         linewidth=2,
         label=f"njit fit: y = {k_njit:.2f}x + {b_njit:.2f}",
     )
-    ax.set_xlabel("Number of ops (fused into inductor graph)")
-    ax.set_ylabel("Overhead (µs/call)")
-    ax.set_title("CPU Overhead: NjitInductorGraph vs torch.compile")
+    ax.set_xlabel("Number of Triton kernels in graph")
+    ax.set_ylabel("Latency (µs/call)")
+    ax.set_title("CPU Latency: NjitInductorGraph vs torch.compile")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -237,49 +239,46 @@ def main():
     env_info = _collect_env()
 
     md_table_rows = []
-    for i, n_ops in enumerate(op_counts):
-        md_table_rows.append(
-            f"| {n_ops} | {times_njit[i]:.2f} | {times_compile[i]:.2f} |"
-        )
+    for i, n in enumerate(kernel_counts):
+        md_table_rows.append(f"| {n} | {times_njit[i]:.2f} | {times_compile[i]:.2f} |")
     md_table = "\n".join(md_table_rows)
 
     env_table_rows = "\n".join(f"| {k} | {v} |" for k, v in env_info.items())
 
     readme = f"""\
-# Inductor vs njit: CPU Graph-Call Overhead
+# Inductor vs njit: CPU Latency by Number of Kernels
 
 Measures wall-clock time of running an inductor-compiled graph through
 `NjitInductorGraph` (the njit wrapper) vs the standard `torch.compile`
-Python wrapper.  All tensors are tiny (4×4) so GPU compute is negligible —
-only the CPU orchestration overhead is measured (buffer allocation, grid
-computation, kernel launches).  No `cudaDeviceSynchronize` is called.
+Python wrapper.  Tensors are small (32×64) so GPU compute is negligible —
+only the CPU orchestration overhead is measured.  No `cudaDeviceSynchronize`
+is called.
 
-The independent variable is the number of fused pointwise ops per graph
-(1 to 64 chained `torch.relu` calls after an initial `x + y`).
+The independent variable is the number of Triton kernels in the graph.
+Each graph is a chain of `torch.softmax` calls with alternating dims
+(`dim=i%2`), which forces inductor to produce exactly one kernel per op.
 
 ## Results
 
-![overhead_vs_ops]({plot_name})
+![overhead_vs_kernels]({plot_name})
 
 ### Linear fit (outliers removed, 2σ threshold)
 
-|         | model     | k (µs/op) | b (µs)  |
-|---------|-----------|-----------|---------|
-| njit    | y = kx+b  | {k_njit:.4f}    | {b_njit:.4f}  |
-| compile | y = kx    | {k_compile:.4f}    | 0 (forced) |
+|         | model     | k (µs/kernel) | b (µs)  |
+|---------|-----------|---------------|---------|
+| njit    | y = kx+b  | {k_njit:.4f}        | {b_njit:.4f}  |
+| compile | y = kx+b  | {k_compile:.4f}        | {b_compile:.4f}  |
 
-- **k** (slope) is the **per-op cost** — the marginal time (in µs) added by
-  each additional fused op in the inductor graph.  For `torch.compile` this
-  includes the Python wrapper overhead; for njit this is the compiled
-  orchestration cost.
+- **k** (slope) is the **per-kernel cost** — the marginal time (in µs)
+  added by each additional Triton kernel launch.
 - **b** (intercept) is the **fixed overhead** — the baseline time (in µs)
-  for entering and leaving the function.  For njit, this captures the Numba
-  dispatcher + tensor borrow/wrap cost.
+  for entering and leaving the wrapper, independent of how many kernels
+  are launched.
 
 ### Raw data
 
-| Ops | njit (µs) | compile (µs) |
-|-----|-----------|--------------|
+| Kernels | njit (µs) | compile (µs) |
+|---------|-----------|--------------|
 {md_table}
 
 > {ITERS} iterations per data point, {WARMUP} warmup iterations.

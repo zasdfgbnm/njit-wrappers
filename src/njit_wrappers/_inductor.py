@@ -31,6 +31,7 @@ import numba
 import torch
 
 from njit_wrappers._inductor_extract import (
+    AliasOp,
     AllocOp,
     ExternKernelOp,
     FreeOp,
@@ -467,6 +468,11 @@ class NjitInductorGraph:
                     f"(encountered for {op.name} from {op.src}). "
                     f"This may require an as_strided intrinsic."
                 )
+
+            elif isinstance(op, AliasOp):
+                # Buffer reuse: buf5 = buf2 — just add a var_map alias
+                src_var = var_map.get(op.src, op.src)
+                var_map[op.name] = src_var
 
             elif isinstance(op, FreeOp):
                 # Can't free inside njit (known limitation)

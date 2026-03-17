@@ -79,6 +79,14 @@ class ReturnOp:
 
 
 @dataclass
+class AliasOp:
+    """Alias one buffer to another (``buf5 = buf2``, buffer reuse)."""
+
+    name: str
+    src: str
+
+
+@dataclass
 class ExternKernelOp:
     """Call an external kernel (e.g. ``extern_kernels.mm``)."""
 
@@ -93,7 +101,13 @@ class InductorSchedule:
 
     input_names: list[str]
     ops: list[
-        AllocOp | KernelLaunchOp | ReinterpretOp | FreeOp | ReturnOp | ExternKernelOp
+        AllocOp
+        | KernelLaunchOp
+        | ReinterpretOp
+        | FreeOp
+        | ReturnOp
+        | AliasOp
+        | ExternKernelOp
     ]
     kernel_sources: dict[str, str] = field(default_factory=dict)
     triton_meta: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -241,12 +255,26 @@ def _parse_call_function(  # noqa: C901
     func_def: ast.FunctionDef,
 ) -> tuple[
     list[str],
-    list[AllocOp | KernelLaunchOp | ReinterpretOp | FreeOp | ReturnOp | ExternKernelOp],
+    list[
+        AllocOp
+        | KernelLaunchOp
+        | ReinterpretOp
+        | FreeOp
+        | ReturnOp
+        | AliasOp
+        | ExternKernelOp
+    ],
 ]:
     """Parse the body of an inductor ``call(args)`` function."""
     input_names: list[str] = []
     ops: list[
-        AllocOp | KernelLaunchOp | ReinterpretOp | FreeOp | ReturnOp | ExternKernelOp
+        AllocOp
+        | KernelLaunchOp
+        | ReinterpretOp
+        | FreeOp
+        | ReturnOp
+        | AliasOp
+        | ExternKernelOp
     ] = []
 
     for stmt in func_def.body:
@@ -324,6 +352,11 @@ def _parse_call_function(  # noqa: C901
 
             # Skip stream assignment: s0 = ... or with ...
             if isinstance(target, ast.Name) and target.id.startswith("s"):
+                continue
+
+            # Simple alias: buf5 = buf2  (buffer reuse)
+            if isinstance(target, ast.Name) and isinstance(stmt.value, ast.Name):
+                ops.append(AliasOp(target.id, stmt.value.id))
                 continue
 
         # Kernel launch via .run(...) — most common inductor pattern

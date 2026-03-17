@@ -177,6 +177,31 @@ for _name, _args, _llvm_sym, _cc in _ATEN_OPS:
 # AtenTensorHandle is an opaque pointer compatible with TensorImpl*.
 llvm.add_symbol("aoti_torch_get_numel", _fn_addr(_TORCH_LIB, "aoti_torch_get_numel"))
 
+# aoti_torch_empty_strided is a C function exported by libtorch_cpu.so:
+#   int32_t aoti_torch_empty_strided(int64_t ndim, const int64_t* sizes,
+#       const int64_t* strides, int32_t dtype, int32_t device_type,
+#       int32_t device_index, AtenTensorHandle* ret)
+llvm.add_symbol(
+    "aoti_torch_empty_strided",
+    _fn_addr(_TORCH_LIB, "aoti_torch_empty_strided"),
+)
+
+# Mapping from torch.dtype to c10::ScalarType integer values.
+_DTYPE_TO_SCALAR_TYPE: dict[torch.dtype, int] = {
+    torch.float32: 6,
+    torch.float64: 7,
+    torch.float16: 5,
+    torch.bfloat16: 15,
+    torch.int8: 1,
+    torch.int16: 2,
+    torch.int32: 3,
+    torch.int64: 4,
+    torch.uint8: 0,
+    torch.bool: 11,
+    torch.complex64: 9,
+    torch.complex128: 10,
+}
+
 # ---------------------------------------------------------------------------
 # Numba type system
 # ---------------------------------------------------------------------------
@@ -411,6 +436,85 @@ def _make_reduction_intrinsic(sym: str):
         return sig, codegen
 
     return _op
+
+
+# ---------------------------------------------------------------------------
+# empty_strided intrinsic factory (for inductor buffer allocation)
+# ---------------------------------------------------------------------------
+
+
+def _make_empty_strided_intrinsic(shape, stride, dtype, device_type, device_index):
+    """Return a no-arg @intrinsic that allocates a tensor via aoti_torch_empty_strided.
+
+    All parameters are baked into the LLVM IR as constants so the intrinsic
+    takes zero arguments and returns a TensorType (i64 holding TensorImpl*).
+
+    ``aoti_torch_empty_strided`` writes a heap-allocated ``at::Tensor*``
+    (``AtenTensorHandle``) into the output slot.  Since ``at::Tensor`` is
+    just 8 bytes holding ``TensorImpl*``, we dereference the handle once
+    to obtain the raw ``TensorImpl*`` we store as our i64 representation.
+    The heap ``at::Tensor`` is leaked (same known limitation as other
+    intermediates produced inside ``@njit``).
+    """
+    ndim = len(shape)
+    dtype_int = _DTYPE_TO_SCALAR_TYPE[dtype]
+
+    @intrinsic
+    def _alloc(typingctx):
+        sig = tensor_type()
+
+        def codegen(context, builder, signature, args):
+            i64 = ir.IntType(64)
+            i32 = ir.IntType(32)
+            i8p = ir.IntType(8).as_pointer()
+
+            # Build constant arrays on the stack for sizes and strides
+            sizes_arr = builder.alloca(ir.ArrayType(i64, ndim))
+            strides_arr = builder.alloca(ir.ArrayType(i64, ndim))
+            zero32 = ir.Constant(i32, 0)
+            for i in range(ndim):
+                ptr_s = builder.gep(sizes_arr, [zero32, ir.Constant(i32, i)])
+                builder.store(ir.Constant(i64, shape[i]), ptr_s)
+                ptr_st = builder.gep(strides_arr, [zero32, ir.Constant(i32, i)])
+                builder.store(ir.Constant(i64, stride[i]), ptr_st)
+
+            sizes_ptr = builder.bitcast(sizes_arr, i64.as_pointer())
+            strides_ptr = builder.bitcast(strides_arr, i64.as_pointer())
+
+            # Output slot: receives AtenTensorHandle (= at::Tensor*)
+            # which is a pointer-sized value.
+            handle_slot = builder.alloca(i8p)
+
+            fn = cgutils.get_or_insert_function(
+                builder.module,
+                ir.FunctionType(
+                    i32,
+                    [i64, i64.as_pointer(), i64.as_pointer(), i32, i32, i32, i8p],
+                ),
+                "aoti_torch_empty_strided",
+            )
+            # Pass &handle_slot as AtenTensorHandle*
+            builder.call(
+                fn,
+                [
+                    ir.Constant(i64, ndim),
+                    sizes_ptr,
+                    strides_ptr,
+                    ir.Constant(i32, dtype_int),
+                    ir.Constant(i32, device_type),
+                    ir.Constant(i32, device_index),
+                    builder.bitcast(handle_slot, i8p),
+                ],
+            )
+            # Load the AtenTensorHandle (at::Tensor*) from the slot
+            handle = builder.load(handle_slot)
+            # Dereference at::Tensor* to get TensorImpl* (first 8 bytes)
+            impl_ptr = builder.bitcast(handle, i64.as_pointer())
+            return builder.load(impl_ptr)
+
+        return sig, codegen
+
+    return _alloc
 
 
 # ---------------------------------------------------------------------------

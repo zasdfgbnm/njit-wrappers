@@ -10,4 +10,8 @@ def __getattr__(name: str) -> object:
         from njit_wrappers._triton import NumbaTritonKernel
 
         return NumbaTritonKernel
+    if name == "NjitInductorGraph":
+        from njit_wrappers._inductor import NjitInductorGraph
+
+        return NjitInductorGraph
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

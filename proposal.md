@@ -81,15 +81,46 @@ complex.
 
 ### Core idea
 
-Replace TorchInductor's Python-level graph runner with a `numba.njit`-compiled function. The
-runner is the code that allocates scratch buffers, launches Triton kernels, calls ATen extern
-kernels, and assembles outputs. Today it is ordinary Python executed by CPython. We propose to
-JIT-compile it with Numba's LLVM-based compiler, eliminating interpreter overhead on every call.
+TorchInductor's compilation pipeline (`torch/_inductor/codegen/wrapper.py`) generates a Python
+source file for each compiled model. The heart of that file is a `call(args)` function — the
+orchestration runner — that executes on every forward pass. A representative example:
+
+```python
+def call(args):
+    primals_1, primals_2 = args
+    with torch.cuda._DeviceGuard(0):
+        s0 = torch.cuda.current_stream()
+        buf0 = torch.empty_strided((1024,), (1,), dtype=torch.float32, device='cuda')
+        triton_poi_fused_0.run(primals_1, primals_2, buf0, 1024,
+                               grid=(grid(1024),), stream=s0)
+        return (buf0,)
+```
+
+Every time this function is called, CPython pays a cascade of overhead costs:
+
+- **Frame allocation.** A new Python stack frame is pushed and torn down on each call.
+- **Buffer allocation via `torch.empty_strided`.** Each call constructs Python tuples for shape
+  and stride, resolves keyword arguments, and crosses the Python/C++ boundary into ATen.
+- **Grid computation.** `math.ceil(n / BLOCK_SIZE)` allocates a Python integer; wrapping it in
+  a tuple `(gridX, gridY, gridZ)` allocates another Python object.
+- **Triton's Python launcher.** `triton_poi_fused_0.run(...)` enters `JITFunction.__call__`,
+  which inspects argument types and shapes, selects a specialization, builds a `void*` parameter
+  array in Python, and finally crosses into a `ctypes`-wrapped C function to call
+  `cuLaunchKernelEx`. That single kernel launch traverses four to six Python frames.
+
+None of this work is intrinsic to dispatching a GPU kernel. It is interpreter bookkeeping.
+
+We propose to replace the `call(args)` function with a `@numba.njit`-compiled equivalent.
+The compiled function performs exactly the same operations — buffer allocation via
+`aoti_torch_empty_strided` (a stable C ABI export from `libtorch`), grid arithmetic in compiled
+integer code, and kernel launch via a thin C trampoline that calls `cuLaunchKernelEx` directly —
+but without a Python interpreter in the loop. No Triton Python launcher, no `ctypes` overhead,
+no frame allocation on the hot path.
 
 **What this is NOT:** We are not using Numba to generate GPU kernels. All GPU computation
 continues to be produced by Triton (for element-wise and reduction ops) and ATen/cuBLAS (for
 extern kernels such as GEMM). Numba is used purely for the *orchestration* layer — the host-side
-loop that drives the GPU.
+`call(args)` function that drives the GPU.
 
 ### Why `numba.njit` rather than, say, C++?
 

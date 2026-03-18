@@ -84,17 +84,24 @@ complex.
 TorchInductor's compilation pipeline
 ([`torch/_inductor/codegen/wrapper.py`](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/codegen/wrapper.py))
 generates a Python source file for each compiled model. The heart of that file is a `call(args)`
-function — the orchestration runner — that executes on every forward pass. The following is the
-actual Inductor output for a `relu(x + y)` model, capturable via `graph.source_code`
-(see [Section 3](#3-end-to-end-inductor-graph-wrapping-njitinductorgraph)):
+function — the orchestration runner — that executes on every forward pass. The following is taken
+directly from the
+[TorchInductor C++ Wrapper Tutorial](https://docs.pytorch.org/tutorials/unstable/inductor_cpp_wrapper_tutorial.html)
+in the official PyTorch documentation:
 
 ```python
 def call(args):
-    x, y = args
-    buf0 = empty_strided_cuda((1024,), (1,), torch.float32)
-    triton_poi_fused_add_relu_0.run(x, y, buf0, 1024,
-                                    grid=grid(1024), stream=stream0)
-    return (buf0,)
+    arg0_1, = args
+    args.clear()
+    assert_size_stride(arg0_1, (1, ), (1, ))
+    with torch.cuda._DeviceGuard(0):
+        torch.cuda.set_device(0)
+        buf0 = empty_strided((19, ), (1, ), device='cuda', dtype=torch.float32)
+        stream0 = get_cuda_stream(0)
+        triton_poi_fused_add_lift_fresh_0.run(constant0, arg0_1, buf0, 19,
+                                              grid=grid(19), stream=stream0)
+        del arg0_1
+        return (buf0, )
 ```
 
 Every time this function is called, CPython pays a cascade of overhead costs:

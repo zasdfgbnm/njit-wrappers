@@ -121,24 +121,123 @@ capabilities:
 
 #### 1. `torch.Tensor` inside `@numba.njit` ([source](https://github.com/zasdfgbnm/njit-wrappers/blob/main/src/njit_wrappers/_tensor.py), [benchmark](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/eager-vs-njit))
 
-We registered `torch.Tensor` as a native Numba type backed by a `TensorImpl*` pointer (stored
-as `int64` inside compiled code). The unboxing step (Python → Numba) borrows the pointer without
-touching the reference count; the Python object's lifetime guarantees the pointer remains valid
-for the duration of the call. The boxing step (Numba → Python) wraps the pointer back into a
-Python tensor.
+**Study.** Can `torch.Tensor` be made a first-class type in Numba's JIT, such that Python-level
+tensor operations compile down to direct ATen C++ calls with no Python interpreter involvement?
 
-ATen operators are called by resolving their Itanium-mangled C++ symbol from `libtorch_cpu.so`
-at import time and emitting an LLVM intrinsic call. No runtime Python dispatch occurs. The
-following calling conventions are implemented:
+**Experiment design.** The key insight is that `at::Tensor` is exactly 8 bytes — it contains
+only a `TensorImpl*` — so it can be represented inside Numba's compiled code as a plain `i64`.
+The Python-to-compiled-code boundary is crossed by two thin C shims (`njit_borrow_impl` and
+`njit_wrap_impl`) exported from a small C++ extension. For each ATen operator, its Itanium-mangled
+C++ symbol is resolved from `libtorch_cpu.so` at import time and registered with LLVM; Numba
+then emits a direct `call` instruction with no Python involvement.
 
-- **Unary:** `void(sret Tensor*, const Tensor&)` — covers `relu`, `exp`, `log`, `sigmoid`,
-  `tanh`, `silu`, and ~15 more.
-- **Binary:** `void(sret Tensor*, const Tensor&, const Tensor&)` — covers `+`, `-`, `*`, `/`,
-  `@`, comparison ops.
-- **Alpha:** `void(sret Tensor*, Tensor&, Tensor&, Scalar&)` — covers scalar-weighted add/sub.
-- **Reduction:** `void(sret Tensor*, Tensor&, Optional<ScalarType>)` — covers `sum`, `mean`.
+The full path from Python to LLVM IR is:
 
-Benchmark (NVIDIA GB200, 4×4 tensors, no synchronization, 1000 iterations):
+1. `@typeof_impl` — tells Numba that a `torch.Tensor` Python object has type `TensorType`
+2. `@register_model(TensorType)` — tells Numba to represent it as `ir.IntType(64)` (the `TensorImpl*`)
+3. `@unbox(TensorType)` — emits `%impl = call i64 @njit_borrow_impl(i8* %pyobj)` to cross the boundary
+4. `@intrinsic` per op — emits spill-to-stack + direct ATen call + load result
+5. `@box(TensorType)` — emits `%obj = call i8* @njit_wrap_impl(i64 %impl)` on the way back out
+
+ATen's calling conventions (SysV x86-64, `sret` return) are handled by four intrinsic factories:
+
+| Convention | Signature | Ops |
+|---|---|---|
+| Unary | `void(sret Tensor*, const Tensor&)` | `relu`, `exp`, `log`, `sigmoid`, `tanh`, `silu`, … |
+| Binary | `void(sret Tensor*, const Tensor&, const Tensor&)` | `+`, `*`, `/`, `@`, `==`, `<`, … |
+| Alpha | `void(sret Tensor*, const Tensor&, const Tensor&, const Scalar&)` | `+`, `-` (with `alpha=1`) |
+| Reduction | `void(sret Tensor*, const Tensor&, i16 optional<ScalarType>)` | `sum`, `mean` |
+
+The `sret` slot and every `const Tensor&` argument are stack-allocated `i64` slots; the alpha
+case additionally builds a `c10::Scalar(1)` as a 32-byte `[4 x i64]` on the stack.
+
+**Example.** The two-layer MLP from [docs/torch-ops.md](https://github.com/zasdfgbnm/njit-wrappers/blob/main/docs/torch-ops.md):
+
+```python
+@numba.njit
+def mlp_forward(x, w1, b1, w2, b2):
+    """Two-layer MLP: relu(x @ w1 + b1) @ w2 + b2."""
+    h = torch.relu(x @ w1 + b1)
+    return h @ w2 + b2
+```
+
+The core LLVM IR generated for this function (simplified: Numba bookkeeping omitted, faithful
+to the actual ATen call patterns):
+
+```llvm
+define i8* @mlp_forward(i8* %x_obj, i8* %w1_obj, i8* %b1_obj,
+                         i8* %w2_obj, i8* %b2_obj) {
+entry:
+  ; ── Unbox: borrow TensorImpl* without touching refcount ─────────────
+  %x  = call i64 @njit_borrow_impl(i8* %x_obj)
+  %w1 = call i64 @njit_borrow_impl(i8* %w1_obj)
+  %b1 = call i64 @njit_borrow_impl(i8* %b1_obj)
+  %w2 = call i64 @njit_borrow_impl(i8* %w2_obj)
+  %b2 = call i64 @njit_borrow_impl(i8* %b2_obj)
+  ; njit_borrow_impl resolves to _bridge.cpp: returns TensorImpl* as i64
+  ; without touching the refcount — safe because Python keeps the objects alive
+
+  ; ── x @ w1  (_ZN2at4_ops7matmul4callERKNS_6TensorES4_) ──────────────
+  %xw1.out = alloca i64
+  %x.slot  = alloca i64 ; stack slot IS the at::Tensor (sizeof == 8)
+  store i64 %x,  i64* %x.slot
+  %w1.slot = alloca i64
+  store i64 %w1, i64* %w1.slot
+  call void @_aten_matmul(i8* sret bitcast(i64* %xw1.out to i8*),
+                            i8*      bitcast(i64* %x.slot  to i8*),
+                            i8*      bitcast(i64* %w1.slot to i8*))
+  %xw1 = load i64, i64* %xw1.out
+
+  ; ── (x@w1) + b1  (_ZN2at4_ops10add_Tensor4callERKNS_6TensorES4_RKNS_6ScalarE) ─
+  %hpre.out = alloca i64
+  %xw1.slot = alloca i64
+  store i64 %xw1, i64* %xw1.slot
+  %b1.slot  = alloca i64
+  store i64 %b1,  i64* %b1.slot
+  %alpha    = alloca [4 x i64]        ; c10::Scalar(1): {value=1, pad=0, tag=HAS_i, pad=0}
+  store i64 1, i64* getelementptr([4 x i64], [4 x i64]* %alpha, i32 0, i32 0)
+  store i64 0, i64* getelementptr([4 x i64], [4 x i64]* %alpha, i32 0, i32 1)
+  store i64 1, i64* getelementptr([4 x i64], [4 x i64]* %alpha, i32 0, i32 2)
+  store i64 0, i64* getelementptr([4 x i64], [4 x i64]* %alpha, i32 0, i32 3)
+  call void @_aten_add(i8* sret bitcast(i64* %hpre.out  to i8*),
+                        i8*      bitcast(i64* %xw1.slot  to i8*),
+                        i8*      bitcast(i64* %b1.slot   to i8*),
+                        i8*      bitcast([4 x i64]* %alpha to i8*))
+  %hpre = load i64, i64* %hpre.out
+
+  ; ── relu(hpre)  (_ZN2at4_ops4relu4callERKNS_6TensorE) ────────────────
+  %h.out    = alloca i64
+  %hpre.slot = alloca i64
+  store i64 %hpre, i64* %hpre.slot
+  call void @_aten_relu(i8* sret bitcast(i64* %h.out    to i8*),
+                         i8*      bitcast(i64* %hpre.slot to i8*))
+  %h = load i64, i64* %h.out
+
+  ; ── h @ w2  (same pattern as x @ w1) ────────────────────────────────
+  ; ...  (identical matmul pattern, omitted for brevity)
+  %hw2 = ...
+
+  ; ── (h@w2) + b2  (same pattern as (x@w1) + b1) ──────────────────────
+  ; ...
+  %result = ...
+
+  ; ── Box: wrap TensorImpl* back into a Python torch.Tensor ────────────
+  %ret = call i8* @njit_wrap_impl(i64 %result)
+  ret i8* %ret
+}
+
+; External declarations resolved from libtorch_cpu.so at import time:
+declare void @_aten_matmul(i8* sret, i8*, i8*)
+  ; → _ZN2at4_ops7matmul4callERKNS_6TensorES4_
+declare void @_aten_add(i8* sret, i8*, i8*, i8*)
+  ; → _ZN2at4_ops10add_Tensor4callERKNS_6TensorES4_RKNS_6ScalarE
+declare void @_aten_relu(i8* sret, i8*)
+  ; → _ZN2at4_ops4relu4callERKNS_6TensorE
+declare i64  @njit_borrow_impl(i8*)   ; _bridge.cpp
+declare i8*  @njit_wrap_impl(i64)     ; _bridge.cpp
+```
+
+**Results.** Benchmark on NVIDIA GB200, `torch.relu` chain on 4×4 tensors, 1000 iterations:
 
 ![Eager vs njit overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/eager-vs-njit/overhead_vs_ops.png)
 
@@ -156,12 +255,102 @@ is always faster.
 
 #### 2. Triton kernel launch inside `@numba.njit` ([source](https://github.com/zasdfgbnm/njit-wrappers/blob/main/src/njit_wrappers/_triton.py), [benchmark](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/triton-vs-njit))
 
-We implemented `NumbaTritonKernel`, which wraps a compiled Triton kernel and generates a C
-trampoline that calls `cuLaunchKernelEx` directly. A runtime specialization check inspects
-pointer alignment at call time; if all pointers are 16-byte aligned, it dispatches to a
-pre-compiled variant that passes `tt.divisibility=16` hints, enabling 128-bit vectorized loads.
+**Study.** Can a compiled Triton kernel be launched directly from `@numba.njit` code, bypassing
+Triton's Python-based launcher entirely?
 
-Benchmark (NVIDIA A100-SXM4-80GB, 1024-element add kernel, no synchronization, 1000 iterations):
+**Experiment design.** Triton's normal Python launcher path involves multiple layers of dispatch:
+`kernel[grid](args)` → `JITFunction.__call__` → `CompiledKernel.run` → `driver.launch` →
+`cuLaunchKernelEx`. Every step involves Python frame allocation, attribute lookups, and
+`ctypes`/cffi overhead. The `NumbaTritonKernel` class short-circuits all of this.
+
+The architecture has three steps:
+
+1. **Compile.** `NumbaTritonKernel` compiles the Triton kernel for a fixed type signature via
+   `triton_compile()`. Because constexprs are baked in, the kernel binary is fixed at
+   `NumbaTritonKernel` construction time.
+
+2. **Generate C trampolines.** For a kernel with K specializable arguments (pointers and
+   integers), 2^K C trampolines are generated — one per alignment combination. Each trampoline
+   is a plain C function that packs arguments into a `void*` array and calls `cuLaunchKernelEx`
+   directly via `dlsym`. Trampolines are compiled to shared libraries with `compile_module_from_src`.
+
+3. **Generate `@numba.njit` launcher.** A single `@numba.njit` function is generated that
+   checks `arg % 16 == 0` for each specializable argument and dispatches to the matching
+   trampoline. Tensor pointer arguments are extracted from `TensorImpl*` via `njit_data_ptr`
+   (another direct ATen C call), so no Python is involved in the hot path.
+
+**Example.** The vector-add kernel from [docs/triton.md](https://github.com/zasdfgbnm/njit-wrappers/blob/main/docs/triton.md):
+
+```python
+@triton.jit
+def add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid  = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < n_elements
+    tl.store(out_ptr + offs, tl.load(x_ptr + offs, mask=mask)
+                            + tl.load(y_ptr + offs, mask=mask), mask=mask)
+
+numba_add = NumbaTritonKernel(
+    add_kernel,
+    signature={'x_ptr': '*fp32', 'y_ptr': '*fp32', 'out_ptr': '*fp32', 'n_elements': 'i32'},
+    constexprs={'BLOCK_SIZE': 1024},
+)
+launch_add = numba_add.launch  # extract before using inside @njit
+
+@numba.njit
+def f(x, y, out, stream):
+    n    = x.numel()
+    grid = (n + 1023) // 1024
+    launch_add(grid, 1, 1, stream, x, y, out, n)
+```
+
+The generated C trampoline for the all-aligned variant
+(where `tt.divisibility=16` is hinted to Triton, enabling 128-bit vectorized loads):
+
+```c
+/* auto-generated by njit_wrappers._triton for add_kernel, variant 1111 (all aligned) */
+int launch_add_kernel_1111(
+    int gridX, int gridY, int gridZ,
+    int num_warps, int num_ctas, int coop, int pdl, int shared_memory,
+    uint64_t stream, uint64_t function,
+    uint64_t arg0,   /* x_ptr   — passed as raw device pointer */
+    uint64_t arg1,   /* y_ptr   */
+    uint64_t arg2,   /* out_ptr */
+    int32_t  arg3)   /* n_elements */
+{
+    if (gridX * gridY * gridZ <= 0) return 0;
+
+    CUdeviceptr p0 = (CUdeviceptr)arg0;
+    CUdeviceptr p1 = (CUdeviceptr)arg1;
+    CUdeviceptr p2 = (CUdeviceptr)arg2;
+    int32_t     v3 = arg3;
+    CUdeviceptr scratch0 = 0, scratch1 = 0;   /* no scratch memory needed */
+
+    void *params[6] = {&p0, &p1, &p2, &v3, &scratch0, &scratch1};
+
+    CUlaunchConfig config;
+    config.gridDimX      = gridX;
+    config.gridDimY      = gridY;
+    config.gridDimZ      = gridZ;
+    config.blockDimX     = 32 * num_warps;   /* BLOCK_SIZE=1024 → num_warps=32 */
+    config.blockDimY     = 1;
+    config.blockDimZ     = 1;
+    config.sharedMemBytes = shared_memory;
+    config.hStream       = (CUstream)stream;
+    config.attrs         = NULL;
+    config.numAttrs      = 0;
+
+    cuLaunchKernelEx_t fn = get_launch_handle();  /* dlsym("cuLaunchKernelEx") once */
+    return (int)fn(&config, (CUfunction)function, params, 0);
+}
+```
+
+The 2^4 = 16 variants for this kernel's 4 specializable arguments are compiled once at
+`NumbaTritonKernel` construction time. The `@numba.njit` dispatcher selects among them with
+four integer comparisons per call — the only runtime cost beyond the `cuLaunchKernelEx` call
+itself.
+
+**Results.** Benchmark on NVIDIA A100-SXM4-80GB, 1024-element add kernel, 1000 iterations:
 
 ![Triton vs njit kernel launch overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/triton-vs-njit/overhead_vs_kernels.png)
 
@@ -178,14 +367,106 @@ Python dispatch; `cuLaunchKernelEx` called directly from compiled code eliminate
 
 #### 3. End-to-end inductor graph wrapping (`NjitInductorGraph`) ([source](https://github.com/zasdfgbnm/njit-wrappers/blob/main/src/njit_wrappers/_inductor.py), [benchmark](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit))
 
-`NjitInductorGraph` is a drop-in replacement for `torch.compile`. It runs the model through
-`torch.compile(backend='inductor', fullgraph=True)`, captures the generated Python source, parses
-it into an IR (buffer allocations, kernel launches, extern kernels, aliases, returns), and emits
-a single `@numba.njit` function that performs the same computation without any Python interpreter
-calls.
+**Study.** Can TorchInductor's complete compiled graph runner — buffer allocation, Triton kernel
+launches, extern ATen calls, and output assembly — be replaced end-to-end with a single
+`@numba.njit` function, with no changes to Triton or the kernel compilation pipeline?
 
-Benchmark (NVIDIA GB200, 32×64 tensors, `torch.softmax` chain, no synchronization, 1000
-iterations):
+**Experiment design.** `NjitInductorGraph` composes Modules 1 and 2 above into a full pipeline:
+
+1. **Compile via Inductor.** The model is compiled through
+   `torch.compile(backend='inductor', fullgraph=True)`. The generated Python source code is
+   captured before execution.
+
+2. **Parse into a schedule.** The generated Python is parsed with `ast` into a flat sequence of
+   typed operations: `AllocOp` (buffer allocation), `KernelLaunchOp` (Triton kernel launch),
+   `ExternKernelOp` (ATen mm/addmm), `AliasOp` (buffer reuse), and `ReturnOp`. This parser is
+   ~500 lines and handles all patterns Inductor currently generates for CUDA graphs.
+
+3. **Wrap Triton kernels.** Each `KernelLaunchOp` is reconstructed from its source and wrapped
+   with `NumbaTritonKernel`. Triton kernel source is embedded in Inductor's generated Python;
+   no additional compilation is needed.
+
+4. **Emit `@numba.njit` runner.** A single `@numba.njit` function is synthesized that:
+   allocates scratch buffers via `aoti_torch_empty_strided` (an LLVM intrinsic backed by a
+   libtorch C export), launches each kernel via its `NumbaTritonKernel` trampoline, and returns
+   the output tensors.
+
+**Example.** The model from [docs/inductor.md](https://github.com/zasdfgbnm/njit-wrappers/blob/main/docs/inductor.md):
+
+```python
+class Model(torch.nn.Module):
+    def forward(self, x, y):
+        return torch.relu(x + y)
+
+graph = NjitInductorGraph(Model().cuda(), (x, y))
+out   = graph(x, y)
+```
+
+Inductor generates a Python runner that looks roughly like:
+
+```python
+# inductor-generated (captured by NjitInductorGraph)
+def call(args):
+    x, y = args
+    buf0 = empty_strided_cuda((1024,), (1,), torch.float32)
+    triton_poi_fused_add_relu_0.run(x, y, buf0, 1024,
+        grid=grid(1024), stream=stream)
+    return (buf0,)
+```
+
+`NjitInductorGraph` parses this and synthesizes the following `@numba.njit` function to replace it
+(shown schematically; actual codegen uses Numba's `@intrinsic` factories):
+
+```python
+# synthesized by NjitInductorGraph — executes with zero Python overhead
+@numba.njit
+def njit_runner(x, y, stream):
+    # AllocOp → aoti_torch_empty_strided intrinsic (all args baked as LLVM constants)
+    buf0 = _alloc_buf0()   # shape=(1024,), stride=(1,), dtype=float32, device=cuda:0
+
+    # KernelLaunchOp → NumbaTritonKernel trampoline (cuLaunchKernelEx directly)
+    n    = 1024
+    grid = (n + 255) // 256
+    launch_triton_poi_fused_add_relu_0(grid, 1, 1, stream, x, y, buf0, n)
+
+    # ReturnOp → box buf0 back to Python
+    return buf0
+```
+
+The corresponding LLVM IR for the `_alloc_buf0` intrinsic (a zero-argument function that
+allocates a `(1024,)` float32 CUDA tensor with all shape/stride/dtype constants baked in):
+
+```llvm
+; _alloc_buf0: allocate empty_strided((1024,), (1,), float32, cuda:0)
+; all parameters are LLVM constants — zero runtime overhead for shape/dtype lookup
+define i64 @_alloc_buf0() {
+entry:
+  %sizes       = alloca [1 x i64]
+  %strides     = alloca [1 x i64]
+  store i64 1024, i64* getelementptr([1 x i64], [1 x i64]* %sizes,   i32 0, i32 0)
+  store i64    1, i64* getelementptr([1 x i64], [1 x i64]* %strides, i32 0, i32 0)
+  %sizes_ptr   = bitcast [1 x i64]* %sizes   to i64*
+  %strides_ptr = bitcast [1 x i64]* %strides to i64*
+  %handle_slot = alloca i8*
+  call i32 @aoti_torch_empty_strided(
+    i64  1,              ; ndim
+    i64* %sizes_ptr,
+    i64* %strides_ptr,
+    i32  6,              ; dtype = c10::ScalarType::Float (float32)
+    i32  1,              ; device_type = CUDA
+    i32  0,              ; device_index = 0
+    i8*  bitcast(i8** %handle_slot to i8*))
+  %handle  = load i8*,  i8** %handle_slot   ; AtenTensorHandle = at::Tensor*
+  %impl_ptr = bitcast i8* %handle to i64*
+  %impl    = load i64, i64* %impl_ptr       ; dereference to get TensorImpl*
+  ret i64 %impl
+}
+
+declare i32 @aoti_torch_empty_strided(i64, i64*, i64*, i32, i32, i32, i8*)
+  ; → aoti_torch_empty_strided from libtorch_cpu.so (stable C ABI)
+```
+
+**Results.** Benchmark on NVIDIA GB200, `torch.softmax` chain on 32×64 tensors, 1000 iterations:
 
 ![Inductor vs njit orchestration overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/inductor-vs-njit/overhead_vs_kernels.png)
 

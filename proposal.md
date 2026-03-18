@@ -81,29 +81,31 @@ complex.
 
 ### Core idea
 
-TorchInductor's compilation pipeline (`torch/_inductor/codegen/wrapper.py`) generates a Python
-source file for each compiled model. The heart of that file is a `call(args)` function — the
-orchestration runner — that executes on every forward pass. A representative example:
+TorchInductor's compilation pipeline
+([`torch/_inductor/codegen/wrapper.py`](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/codegen/wrapper.py))
+generates a Python source file for each compiled model. The heart of that file is a `call(args)`
+function — the orchestration runner — that executes on every forward pass. The following is the
+actual Inductor output for a `relu(x + y)` model, capturable via `graph.source_code`
+(see [Section 3](#3-end-to-end-inductor-graph-wrapping-njitinductorgraph)):
 
 ```python
 def call(args):
-    primals_1, primals_2 = args
-    with torch.cuda._DeviceGuard(0):
-        s0 = torch.cuda.current_stream()
-        buf0 = torch.empty_strided((1024,), (1,), dtype=torch.float32, device='cuda')
-        triton_poi_fused_0.run(primals_1, primals_2, buf0, 1024,
-                               grid=(grid(1024),), stream=s0)
-        return (buf0,)
+    x, y = args
+    buf0 = empty_strided_cuda((1024,), (1,), torch.float32)
+    triton_poi_fused_add_relu_0.run(x, y, buf0, 1024,
+                                    grid=grid(1024), stream=stream0)
+    return (buf0,)
 ```
 
 Every time this function is called, CPython pays a cascade of overhead costs:
 
 - **Frame allocation.** A new Python stack frame is pushed and torn down on each call.
-- **Buffer allocation via `torch.empty_strided`.** Each call constructs Python tuples for shape
+- **Buffer allocation via `empty_strided_cuda`.** Each call constructs Python tuples for shape
   and stride, resolves keyword arguments, and crosses the Python/C++ boundary into ATen.
-- **Grid computation.** `math.ceil(n / BLOCK_SIZE)` allocates a Python integer; wrapping it in
-  a tuple `(gridX, gridY, gridZ)` allocates another Python object.
-- **Triton's Python launcher.** `triton_poi_fused_0.run(...)` enters `JITFunction.__call__`,
+- **Grid computation.** `grid(1024)` is a Python function call that computes
+  `ceil(n / BLOCK_SIZE)`; the result is boxed as a Python integer.
+- **Triton's Python launcher.** `triton_poi_fused_add_relu_0.run(...)` enters
+  [`JITFunction.__call__`](https://github.com/triton-lang/triton/blob/main/python/triton/runtime/jit.py),
   which inspects argument types and shapes, selects a specialization, builds a `void*` parameter
   array in Python, and finally crosses into a `ctypes`-wrapped C function to call
   `cuLaunchKernelEx`. That single kernel launch traverses four to six Python frames.

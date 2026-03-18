@@ -10,8 +10,8 @@
 
 We present a prototype demonstrating that wrapping TorchInductor's generated orchestration code
 with `numba.njit` reduces host-side dispatch latency by **2–5× without changing a single kernel**.
-All computation continues to be performed by Triton and ATen kernels — only the Python
-orchestration layer is replaced by Numba-compiled native code.
+The compiled kernels, the operator semantics, and the overall graph structure are identical to
+what Inductor produces today — we only `@njit` the orchestration layer that drives them.
 
 The prototype lives at [zasdfgbnm/njit-wrappers](https://github.com/zasdfgbnm/njit-wrappers).
 Here is the end-to-end result ([benchmark source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit)):

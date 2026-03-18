@@ -14,17 +14,10 @@ The compiled kernels, the operator semantics, and the overall graph structure ar
 what Inductor produces today — we only `@njit` the orchestration layer that drives them.
 
 The prototype lives at [zasdfgbnm/njit-wrappers](https://github.com/zasdfgbnm/njit-wrappers).
-Here is the end-to-end result ([benchmark source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit)):
-`torch.softmax` chain on 32×64 tensors, NVIDIA GB200, CUDA 13.2, PyTorch 2.11.0a0, Numba 0.64.0,
-Triton 3.6.0.
-
-![Inductor vs njit orchestration overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/inductor-vs-njit/overhead_vs_kernels.png)
-
-| Metric | torch.compile (inductor) | numba.njit orchestration | Speedup |
-|---|---|---|---|
-| Per-kernel dispatch cost | 5.43 µs/kernel | 1.93 µs/kernel | **2.8×** |
-| Fixed call overhead | 46.6 µs | 18.9 µs | **2.5×** |
-| 64-kernel graph wall time | 396.8 µs | 143.7 µs | **2.8×** |
+End-to-end benchmark ([source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit)):
+a chain of `torch.softmax` calls where Inductor generates one Triton kernel per softmax;
+host-side dispatch latency measured without `cudaDeviceSynchronize`.
+The `@njit` orchestration is **2.8× faster** than `torch.compile` at this task.
 
 The proposed integration surface is a single new flag:
 

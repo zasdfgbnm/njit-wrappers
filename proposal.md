@@ -119,14 +119,12 @@ Every time this function is called, CPython pays a cascade of overhead costs:
 
 None of this work is intrinsic to dispatching a GPU kernel. It is interpreter bookkeeping.
 
-We propose to apply `@numba.njit` directly to the generated `call` function. This requires
-refactoring Inductor's codegen to produce `@njit`-compatible output — removing Python-only
-constructs such as context managers, and emitting calls to Numba-registered intrinsics in place
-of plain Python helpers — but the structure of `call` stays the same. No separate code
-generation step, no translation layer: Inductor generates `call`, we decorate it, Numba compiles
-it. Kernel launches go directly to `cuLaunchKernelEx` via a thin C trampoline; buffer allocation
-goes directly to a stable libtorch C ABI call. No Triton Python launcher, no `ctypes` overhead,
-no frame allocation on the hot path.
+We propose to apply `@numba.njit` directly to the generated `call` function. To make this work,
+the generated `Runner` class needs to be refactored so that `call` is `@njit`-compatible. The two
+directions are: (1) move Python-only constructs out of `call` so Numba never sees them, or
+(2) teach Numba how to lower those constructs to LLVM IR by registering them as Numba-typed
+extensions. Either way, the high-level structure of `call` stays the same and no separate
+translation layer is needed.
 
 **What this is NOT:** We are not using Numba to generate GPU kernels. All GPU computation
 continues to be produced by Triton (for element-wise and reduction ops) and ATen/cuBLAS (for

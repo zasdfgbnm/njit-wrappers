@@ -140,6 +140,8 @@ following calling conventions are implemented:
 
 Benchmark (NVIDIA GB200, 4×4 tensors, no synchronization, 1000 iterations):
 
+![Eager vs njit overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/eager-vs-njit/overhead_vs_ops.png)
+
 | Op count | eager (µs) | njit (µs) | Speedup |
 |---|---|---|---|
 | 1 | 9.79 | 14.67 | 0.67× |
@@ -160,6 +162,8 @@ pointer alignment at call time; if all pointers are 16-byte aligned, it dispatch
 pre-compiled variant that passes `tt.divisibility=16` hints, enabling 128-bit vectorized loads.
 
 Benchmark (NVIDIA A100-SXM4-80GB, 1024-element add kernel, no synchronization, 1000 iterations):
+
+![Triton vs njit kernel launch overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/triton-vs-njit/overhead_vs_kernels.png)
 
 | Launch count | eager (µs) | njit (µs) | Speedup |
 |---|---|---|---|
@@ -182,6 +186,8 @@ calls.
 
 Benchmark (NVIDIA GB200, 32×64 tensors, `torch.softmax` chain, no synchronization, 1000
 iterations):
+
+![Inductor vs njit orchestration overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/inductor-vs-njit/overhead_vs_kernels.png)
 
 | Kernel count | torch.compile (µs) | njit (µs) | Speedup |
 |---|---|---|---|

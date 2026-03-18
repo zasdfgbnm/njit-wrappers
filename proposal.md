@@ -65,23 +65,31 @@ with zero algorithmic change.
 
 **Speculative decoding amplifies the problem.** Speculative decoding pairs a small draft model
 with a large target model, running the draft model in a tight loop to propose multiple tokens per
-step. The MLCEngine team reports that "LLM engine overhead reduction becomes *extremely* important
-in speculative decoding scenarios, as the draft model runs in a tight loop and can take a strong
-hit from engine overhead." [1] Host overhead that is tolerable in single-model inference becomes
-the critical path when a second model runs many times per target-model call.
+step. The [MLCEngine team reports](https://blog.mlc.ai/2024/10/10/optimizing-and-characterizing-high-throughput-low-latency-llm-inference)
+that "LLM engine overhead reduction becomes *extremely* important in speculative decoding
+scenarios, as the draft model runs in a tight loop and can take a strong hit from engine
+overhead." Host overhead that is tolerable in single-model inference becomes the critical path
+when a second model runs many times per target-model call. This is corroborated by vLLM's
+[speculative decoding analysis](https://blog.vllm.ai/2024/10/17/spec-decode.html) and
+Snowflake's [Arctic Inference work](https://www.snowflake.com/en/engineering-blog/fast-speculative-decoding-vllm-arctic/),
+both of which identify host-side coordination overhead as a key factor limiting speculative
+decoding efficiency.
 
 **The existing mitigation — CUDA Graphs — has significant limitations.** PyTorch's
 `reduce-overhead` mode and `max-autotune` both use CUDA Graphs to bypass per-kernel Python
-dispatch. CUDA Graphs can deliver up to 10% latency reduction in multi-GPU inference [1], but
-they impose hard constraints: static shapes, no dynamic control flow, no CPU ops in the captured
-graph, and no graph breaks. In practice, real models with dynamic batch sizes, conditional logic,
-or custom ops frequently cannot be captured into a single CUDA Graph [2][3]. When a graph break
-occurs, the entire mechanism degrades silently to the slow Python path.
+dispatch. CUDA Graphs can deliver [up to 10% latency reduction in multi-GPU inference](https://blog.mlc.ai/2024/10/10/optimizing-and-characterizing-high-throughput-low-latency-llm-inference),
+but they impose hard constraints: static shapes, no dynamic control flow, no CPU ops in the
+captured graph, and no graph breaks. In practice, real models with dynamic batch sizes,
+conditional logic, or custom ops frequently cannot be captured into a single CUDA Graph — as
+documented in the [PyTorch CUDAGraph Trees docs](https://docs.pytorch.org/docs/stable/torch.compiler_cudagraph_trees.html)
+and analyzed in depth by [F. Kong (2025)](https://fkong.tech/posts/2025-12-23-cuda-graph-in-torch-compile/).
+When a graph break occurs, the entire mechanism degrades silently to the slow Python path.
 
 **Inference-time scaling makes latency more, not less, critical.** The emerging paradigm of
 inference-time compute scaling — chain-of-thought, tree search, multi-step reasoning — multiplies
-the number of forward passes per user request. Latency that was acceptable for a single pass
-becomes unacceptable when the runtime is chain-of-thought steps × per-step latency [4].
+the number of forward passes per user request. As [Raschka (2025)](https://magazine.sebastianraschka.com/p/state-of-llms-2025)
+notes, latency that was acceptable for a single pass becomes unacceptable when the runtime is
+chain-of-thought steps × per-step latency.
 
 In short: host-side dispatch latency is not an edge case. It is on the critical path for the
 inference workloads that matter most today, and it will become more important as models grow more
@@ -381,27 +389,3 @@ is well-established.
 We welcome feedback on the approach, the integration points, and the scope of changes
 required for upstreaming.
 
----
-
-## References
-
-[1] MLC Blog: *Optimizing and Characterizing High-Throughput Low-Latency LLM Inference in
-MLCEngine* (2024). https://blog.mlc.ai/2024/10/10/optimizing-and-characterizing-high-throughput-low-latency-llm-inference
-
-[2] PyTorch Docs: *CUDAGraph Trees* — dynamic shapes and re-recording overhead.
-https://docs.pytorch.org/docs/stable/torch.compiler_cudagraph_trees.html
-
-[3] F. Kong: *How CUDA Graph Works in torch.compile* (2025).
-https://fkong.tech/posts/2025-12-23-cuda-graph-in-torch-compile/
-
-[4] S. Raschka: *The State of LLMs 2025: Progress, Progress, and Predictions*.
-https://magazine.sebastianraschka.com/p/state-of-llms-2025
-
-[5] vLLM Blog: *How Speculative Decoding Boosts vLLM Performance by up to 2.8×* (2024).
-https://blog.vllm.ai/2024/10/17/spec-decode.html
-
-[6] Snowflake Engineering: *Fastest Speculative Decoding in vLLM with Arctic Inference*.
-https://www.snowflake.com/en/engineering-blog/fast-speculative-decoding-vllm-arctic/
-
-[7] PyTorch Docs: *TorchInductor GPU Profiling*.
-https://docs.pytorch.org/docs/main/user_guide/torch_compiler/torch.compiler_inductor_profiling.html

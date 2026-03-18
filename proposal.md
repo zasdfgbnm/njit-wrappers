@@ -119,12 +119,39 @@ Every time this function is called, CPython pays a cascade of overhead costs:
 
 None of this work is intrinsic to dispatching a GPU kernel. It is interpreter bookkeeping.
 
-We propose to apply `@numba.njit` directly to the generated `call` function. To make this work,
-the generated `Runner` class needs to be refactored so that `call` is `@njit`-compatible. The two
-directions are: (1) move Python-only constructs out of `call` so Numba never sees them, or
-(2) teach Numba how to lower those constructs to LLVM IR by registering them as Numba-typed
-extensions. Either way, the high-level structure of `call` stays the same and no separate
-translation layer is needed.
+We propose to apply `@numba.njit` directly to the generated `call` function. Doing so eliminates
+all four categories of overhead listed above: no Python stack frame is pushed, no Python-level
+tuples are constructed for shape and stride, no boxed-integer grid result is produced, and the
+Triton `JITFunction.__call__` path is bypassed entirely. Together these components account for
+approximately **65%** of the per-kernel Python dispatch cost — reducing it from **5.4 µs to
+1.9 µs** per kernel (see
+[`benchmarks/call-overhead-breakdown`](benchmarks/call-overhead-breakdown/README.md) for the
+per-component breakdown and methodology).
+
+To make this work, the generated `Runner` class needs to be refactored so that `call` is
+`@njit`-compatible. There are two directions.
+
+**Direction 1 — move unsupported constructs out of `call`.**
+Several things in the current generated code are invisible to Numba's type inference: the
+`with torch.cuda._DeviceGuard(0):` context manager (a Python object with `__enter__`/`__exit__`
+methods), `args.clear()` on a plain Python list, and any assertion or `del` statement. These
+constructs do not need to live inside `call` — the device guard can be set once in `__call__`
+on the `Runner` object before forwarding to the compiled function, list clearing can move to a
+thin Python wrapper, and assertions can be hoisted to an outer validation step. The inner
+`call` that Numba sees then contains only tensor operations, buffer allocations, grid
+computations, and kernel launches.
+
+**Direction 2 — teach Numba to lower the constructs it encounters.**
+For the parts that *do* belong in the hot path — tensor creation, kernel launch, stream
+passing — Numba provides a well-defined extension protocol: a `numba.core.types.Type` subclass
+describes the type, a `@typeof_impl` registration tells Numba how to type a Python value at
+the call boundary, a `@type_callable` or `@overload` registration provides the type-inference
+rule for each operation, and a `lower_builtin` / `@intrinsic` registration produces the
+corresponding LLVM IR. This is precisely how `torch.Tensor` is registered in this prototype
+(see `src/njit_wrappers/_tensor.py`) and how Triton kernel objects are registered (see
+`src/njit_wrappers/_triton.py`). The same mechanism covers `torch.empty_strided` (lowers to a
+direct ATen C ABI call), `get_cuda_stream` (lowers to `cudaGetStream`), and the grid tuple
+(lowers to a stack-allocated pair of `i64`).
 
 **What this is NOT:** We are not using Numba to generate GPU kernels. All GPU computation
 continues to be produced by Triton (for element-wise and reduction ops) and ATen/cuBLAS (for

@@ -13,25 +13,10 @@ with `numba.njit` reduces host-side dispatch latency by **2–5× without changi
 All computation continues to be performed by Triton and ATen kernels — only the Python
 orchestration layer is replaced by Numba-compiled native code.
 
-The prototype lives at [zasdfgbnm/njit-wrappers](https://github.com/zasdfgbnm/njit-wrappers)
-and covers three benchmark scenarios:
-
-**Benchmark 1 — Eager ATen ops ([source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/eager-vs-njit)):**
-`torch.relu` chain on 4×4 tensors, NVIDIA GB200.
-
-![Eager vs njit overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/eager-vs-njit/overhead_vs_ops.png)
-
-Per-op dispatch cost: **8.72 µs (eager) → 5.69 µs (njit), 35% reduction.**
-
-**Benchmark 2 — Triton kernel launch ([source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/triton-vs-njit)):**
-Element-wise add kernel, 1024 elements, NVIDIA A100-SXM4-80GB.
-
-![Triton vs njit kernel launch overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/triton-vs-njit/overhead_vs_kernels.png)
-
-Per-launch cost: **13.98 µs (Python) → 2.94 µs (njit), 4.8× reduction.**
-
-**Benchmark 3 — End-to-end inductor graph ([source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit)):**
-`torch.softmax` chain on 32×64 tensors, NVIDIA GB200.
+The prototype lives at [zasdfgbnm/njit-wrappers](https://github.com/zasdfgbnm/njit-wrappers).
+Here is the end-to-end result ([benchmark source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit)):
+`torch.softmax` chain on 32×64 tensors, NVIDIA GB200, CUDA 13.2, PyTorch 2.11.0a0, Numba 0.64.0,
+Triton 3.6.0.
 
 ![Inductor vs njit orchestration overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/inductor-vs-njit/overhead_vs_kernels.png)
 

@@ -151,6 +151,9 @@ ATen's calling conventions (SysV x86-64, `sret` return) are handled by four intr
 The `sret` slot and every `const Tensor&` argument are stack-allocated `i64` slots; the alpha
 case additionally builds a `c10::Scalar(1)` as a 32-byte `[4 x i64]` on the stack.
 
+<details>
+<summary>Example: two-layer MLP (Python → generated LLVM IR)</summary>
+
 **Example.** The two-layer MLP from [docs/torch-ops.md](https://github.com/zasdfgbnm/njit-wrappers/blob/main/docs/torch-ops.md):
 
 ```python
@@ -237,6 +240,8 @@ declare i64  @njit_borrow_impl(i8*)   ; _bridge.cpp
 declare i8*  @njit_wrap_impl(i64)     ; _bridge.cpp
 ```
 
+</details>
+
 **Results.** Benchmark on NVIDIA GB200, `torch.relu` chain on 4×4 tensors, 1000 iterations:
 
 ![Eager vs njit overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/eager-vs-njit/overhead_vs_ops.png)
@@ -278,6 +283,9 @@ The architecture has three steps:
    checks `arg % 16 == 0` for each specializable argument and dispatches to the matching
    trampoline. Tensor pointer arguments are extracted from `TensorImpl*` via `njit_data_ptr`
    (another direct ATen C call), so no Python is involved in the hot path.
+
+<details>
+<summary>Example: vector-add kernel (Python → generated C trampoline)</summary>
 
 **Example.** The vector-add kernel from [docs/triton.md](https://github.com/zasdfgbnm/njit-wrappers/blob/main/docs/triton.md):
 
@@ -350,6 +358,8 @@ The 2^4 = 16 variants for this kernel's 4 specializable arguments are compiled o
 four integer comparisons per call — the only runtime cost beyond the `cuLaunchKernelEx` call
 itself.
 
+</details>
+
 **Results.** Benchmark on NVIDIA A100-SXM4-80GB, 1024-element add kernel, 1000 iterations:
 
 ![Triton vs njit kernel launch overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/triton-vs-njit/overhead_vs_kernels.png)
@@ -390,6 +400,9 @@ launches, extern ATen calls, and output assembly — be replaced end-to-end with
    allocates scratch buffers via `aoti_torch_empty_strided` (an LLVM intrinsic backed by a
    libtorch C export), launches each kernel via its `NumbaTritonKernel` trampoline, and returns
    the output tensors.
+
+<details>
+<summary>Example: relu(x + y) model (Python → inductor-generated runner → synthesized @njit function + LLVM IR)</summary>
 
 **Example.** The model from [docs/inductor.md](https://github.com/zasdfgbnm/njit-wrappers/blob/main/docs/inductor.md):
 
@@ -465,6 +478,8 @@ entry:
 declare i32 @aoti_torch_empty_strided(i64, i64*, i64*, i32, i32, i32, i8*)
   ; → aoti_torch_empty_strided from libtorch_cpu.so (stable C ABI)
 ```
+
+</details>
 
 **Results.** Benchmark on NVIDIA GB200, `torch.softmax` chain on 32×64 tensors, 1000 iterations:
 

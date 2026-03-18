@@ -119,11 +119,13 @@ Every time this function is called, CPython pays a cascade of overhead costs:
 
 None of this work is intrinsic to dispatching a GPU kernel. It is interpreter bookkeeping.
 
-We propose to replace the `call(args)` function with a `@numba.njit`-compiled equivalent.
-The compiled function performs exactly the same operations — buffer allocation via
-`aoti_torch_empty_strided` (a stable C ABI export from `libtorch`), grid arithmetic in compiled
-integer code, and kernel launch via a thin C trampoline that calls `cuLaunchKernelEx` directly —
-but without a Python interpreter in the loop. No Triton Python launcher, no `ctypes` overhead,
+We propose to apply `@numba.njit` directly to the generated `call` function. This requires
+refactoring Inductor's codegen to produce `@njit`-compatible output — removing Python-only
+constructs such as context managers, and emitting calls to Numba-registered intrinsics in place
+of plain Python helpers — but the structure of `call` stays the same. No separate code
+generation step, no translation layer: Inductor generates `call`, we decorate it, Numba compiles
+it. Kernel launches go directly to `cuLaunchKernelEx` via a thin C trampoline; buffer allocation
+goes directly to a stable libtorch C ABI call. No Triton Python launcher, no `ctypes` overhead,
 no frame allocation on the hot path.
 
 **What this is NOT:** We are not using Numba to generate GPU kernels. All GPU computation

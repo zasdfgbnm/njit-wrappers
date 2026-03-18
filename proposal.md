@@ -17,7 +17,9 @@ The prototype lives at [zasdfgbnm/njit-wrappers](https://github.com/zasdfgbnm/nj
 End-to-end benchmark ([source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit)):
 a chain of `torch.softmax` calls where Inductor generates one Triton kernel per softmax;
 host-side dispatch latency measured without `cudaDeviceSynchronize`.
-The `@njit` orchestration is **2.8× faster** than `torch.compile` at this task.
+The `@njit` orchestration is **2.8× faster** than `torch.compile` at this task, as shown in the following figure.
+
+![Inductor vs njit orchestration overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/inductor-vs-njit/overhead_vs_kernels.png)
 
 The proposed integration surface is a single new flag:
 

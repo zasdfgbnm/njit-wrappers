@@ -13,8 +13,27 @@ with `numba.njit` reduces host-side dispatch latency by **2–5× without changi
 All computation continues to be performed by Triton and ATen kernels — only the Python
 orchestration layer is replaced by Numba-compiled native code.
 
-Benchmark results on an NVIDIA GB200 (CUDA 13.2, PyTorch 2.11.0a0, Numba 0.64.0, Triton 3.6.0)
-running a chain of `torch.softmax` ops:
+The prototype lives at [zasdfgbnm/njit-wrappers](https://github.com/zasdfgbnm/njit-wrappers)
+and covers three benchmark scenarios:
+
+**Benchmark 1 — Eager ATen ops ([source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/eager-vs-njit)):**
+`torch.relu` chain on 4×4 tensors, NVIDIA GB200.
+
+![Eager vs njit overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/eager-vs-njit/overhead_vs_ops.png)
+
+Per-op dispatch cost: **8.72 µs (eager) → 5.69 µs (njit), 35% reduction.**
+
+**Benchmark 2 — Triton kernel launch ([source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/triton-vs-njit)):**
+Element-wise add kernel, 1024 elements, NVIDIA A100-SXM4-80GB.
+
+![Triton vs njit kernel launch overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/triton-vs-njit/overhead_vs_kernels.png)
+
+Per-launch cost: **13.98 µs (Python) → 2.94 µs (njit), 4.8× reduction.**
+
+**Benchmark 3 — End-to-end inductor graph ([source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit)):**
+`torch.softmax` chain on 32×64 tensors, NVIDIA GB200.
+
+![Inductor vs njit orchestration overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/inductor-vs-njit/overhead_vs_kernels.png)
 
 | Metric | torch.compile (inductor) | numba.njit orchestration | Speedup |
 |---|---|---|---|
@@ -103,10 +122,11 @@ loop that drives the GPU.
 
 ### Prototype: the `njit-wrappers` repository
 
-To validate feasibility, we built a standalone prototype package — `njit-wrappers` — that
-implements three capabilities:
+To validate feasibility, we built a standalone prototype package —
+[zasdfgbnm/njit-wrappers](https://github.com/zasdfgbnm/njit-wrappers) — that implements three
+capabilities:
 
-#### 1. `torch.Tensor` inside `@numba.njit`
+#### 1. `torch.Tensor` inside `@numba.njit` ([source](https://github.com/zasdfgbnm/njit-wrappers/blob/main/src/njit_wrappers/_tensor.py), [benchmark](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/eager-vs-njit))
 
 We registered `torch.Tensor` as a native Numba type backed by a `TensorImpl*` pointer (stored
 as `int64` inside compiled code). The unboxing step (Python → Numba) borrows the pointer without
@@ -139,7 +159,7 @@ The njit path carries a fixed overhead of ~6.3 µs (Numba dispatch), so the cros
 3–4 ops. For realistic inductor graphs (tens to hundreds of ops per forward pass), the njit path
 is always faster.
 
-#### 2. Triton kernel launch inside `@numba.njit`
+#### 2. Triton kernel launch inside `@numba.njit` ([source](https://github.com/zasdfgbnm/njit-wrappers/blob/main/src/njit_wrappers/_triton.py), [benchmark](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/triton-vs-njit))
 
 We implemented `NumbaTritonKernel`, which wraps a compiled Triton kernel and generates a C
 trampoline that calls `cuLaunchKernelEx` directly. A runtime specialization check inspects
@@ -159,7 +179,7 @@ Linear fit: per-launch cost drops from 13.98 µs (eager Python) to 2.94 µs (nji
 reduction**. The standard Python path through Triton's launcher involves multiple layers of
 Python dispatch; `cuLaunchKernelEx` called directly from compiled code eliminates all of them.
 
-#### 3. End-to-end inductor graph wrapping (`NjitInductorGraph`)
+#### 3. End-to-end inductor graph wrapping (`NjitInductorGraph`) ([source](https://github.com/zasdfgbnm/njit-wrappers/blob/main/src/njit_wrappers/_inductor.py), [benchmark](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit))
 
 `NjitInductorGraph` is a drop-in replacement for `torch.compile`. It runs the model through
 `torch.compile(backend='inductor', fullgraph=True)`, captures the generated Python source, parses

@@ -21,13 +21,13 @@ The `@njit` orchestration is **2.8× faster** than `torch.compile` at this task,
 
 ![Inductor vs njit orchestration overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/inductor-vs-njit/overhead_vs_kernels.png)
 
-The proposed integration surface is a single new flag:
+We propose making Numba an optional dependency and adding a new flag to `torch.compile`:
 
 ```python
 torch.compile(model, enable_numba=True)
 ```
 
-This leaves all existing compilation paths untouched and adds Numba as an optional dependency.
+When set to `True`, TorchInductor's generated orchestration code is compiled with `numba.njit` instead of being executed as plain Python — reducing host-side dispatch latency with no changes to kernel compilation or the Triton backend. All existing compilation paths are untouched.
 
 ---
 

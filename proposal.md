@@ -124,7 +124,10 @@ capabilities:
 **Study.** Can `torch.Tensor` be made a first-class type in Numba's JIT, such that Python-level
 tensor operations compile down to direct ATen C++ calls with no Python interpreter involvement?
 
-**Experiment design.** The key insight is that `at::Tensor` is exactly 8 bytes — it contains
+<details>
+<summary><strong>Experiment design.</strong> Tensor is stored as <code>i64</code> (TensorImpl*); each ATen op is an LLVM intrinsic that spills inputs to the stack and calls the C++ symbol directly — zero Python involvement in the compiled hot path.</summary>
+
+The key insight is that `at::Tensor` is exactly 8 bytes — it contains
 only a `TensorImpl*` — so it can be represented inside Numba's compiled code as a plain `i64`.
 The Python-to-compiled-code boundary is crossed by two thin C shims (`njit_borrow_impl` and
 `njit_wrap_impl`) exported from a small C++ extension. For each ATen operator, its Itanium-mangled
@@ -242,7 +245,12 @@ declare i8*  @njit_wrap_impl(i64)     ; _bridge.cpp
 
 </details>
 
-**Results.** Benchmark on NVIDIA GB200, `torch.relu` chain on 4×4 tensors, 1000 iterations:
+</details>
+
+<details>
+<summary><strong>Results.</strong> Per-op cost drops 35% vs. eager (8.72 µs → 5.69 µs); njit is faster for ≥4 ops on NVIDIA GB200.</summary>
+
+Benchmark on NVIDIA GB200, `torch.relu` chain on 4×4 tensors, 1000 iterations:
 
 ![Eager vs njit overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/eager-vs-njit/overhead_vs_ops.png)
 
@@ -258,12 +266,17 @@ The njit path carries a fixed overhead of ~6.3 µs (Numba dispatch), so the cros
 3–4 ops. For realistic inductor graphs (tens to hundreds of ops per forward pass), the njit path
 is always faster.
 
+</details>
+
 #### 2. Triton kernel launch inside `@numba.njit` ([source](https://github.com/zasdfgbnm/njit-wrappers/blob/main/src/njit_wrappers/_triton.py), [benchmark](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/triton-vs-njit))
 
 **Study.** Can a compiled Triton kernel be launched directly from `@numba.njit` code, bypassing
 Triton's Python-based launcher entirely?
 
-**Experiment design.** Triton's normal Python launcher path involves multiple layers of dispatch:
+<details>
+<summary><strong>Experiment design.</strong> NumbaTritonKernel compiles 2^K C trampolines that call <code>cuLaunchKernelEx</code> directly, selected at runtime by pointer/integer alignment checks — eliminating the entire Triton Python launcher path.</summary>
+
+Triton's normal Python launcher path involves multiple layers of dispatch:
 `kernel[grid](args)` → `JITFunction.__call__` → `CompiledKernel.run` → `driver.launch` →
 `cuLaunchKernelEx`. Every step involves Python frame allocation, attribute lookups, and
 `ctypes`/cffi overhead. The `NumbaTritonKernel` class short-circuits all of this.
@@ -360,7 +373,12 @@ itself.
 
 </details>
 
-**Results.** Benchmark on NVIDIA A100-SXM4-80GB, 1024-element add kernel, 1000 iterations:
+</details>
+
+<details>
+<summary><strong>Results.</strong> Per-launch cost drops 4.8× vs. eager (13.98 µs → 2.94 µs) on NVIDIA A100, with speedup scaling to 4.7× at 64 concurrent launches.</summary>
+
+Benchmark on NVIDIA A100-SXM4-80GB, 1024-element add kernel, 1000 iterations:
 
 ![Triton vs njit kernel launch overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/triton-vs-njit/overhead_vs_kernels.png)
 
@@ -375,13 +393,18 @@ Linear fit: per-launch cost drops from 13.98 µs (eager Python) to 2.94 µs (nji
 reduction**. The standard Python path through Triton's launcher involves multiple layers of
 Python dispatch; `cuLaunchKernelEx` called directly from compiled code eliminates all of them.
 
+</details>
+
 #### 3. End-to-end inductor graph wrapping (`NjitInductorGraph`) ([source](https://github.com/zasdfgbnm/njit-wrappers/blob/main/src/njit_wrappers/_inductor.py), [benchmark](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit))
 
 **Study.** Can TorchInductor's complete compiled graph runner — buffer allocation, Triton kernel
 launches, extern ATen calls, and output assembly — be replaced end-to-end with a single
 `@numba.njit` function, with no changes to Triton or the kernel compilation pipeline?
 
-**Experiment design.** `NjitInductorGraph` composes Modules 1 and 2 above into a full pipeline:
+<details>
+<summary><strong>Experiment design.</strong> NjitInductorGraph captures Inductor's generated Python, parses it into a typed op schedule, and synthesizes a single @numba.njit function covering buffer allocation, kernel launches, and output return — no changes to Triton or Inductor required.</summary>
+
+`NjitInductorGraph` composes Modules 1 and 2 above into a full pipeline:
 
 1. **Compile via Inductor.** The model is compiled through
    `torch.compile(backend='inductor', fullgraph=True)`. The generated Python source code is
@@ -481,7 +504,12 @@ declare i32 @aoti_torch_empty_strided(i64, i64*, i64*, i32, i32, i32, i8*)
 
 </details>
 
-**Results.** Benchmark on NVIDIA GB200, `torch.softmax` chain on 32×64 tensors, 1000 iterations:
+</details>
+
+<details>
+<summary><strong>Results.</strong> Per-kernel cost drops 2.8× (5.43 µs → 1.93 µs) and fixed dispatch overhead drops 2.5× (46.6 µs → 18.9 µs) on NVIDIA GB200.</summary>
+
+Benchmark on NVIDIA GB200, `torch.softmax` chain on 32×64 tensors, 1000 iterations:
 
 ![Inductor vs njit orchestration overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/inductor-vs-njit/overhead_vs_kernels.png)
 
@@ -494,6 +522,8 @@ declare i32 @aoti_torch_empty_strided(i64, i64*, i64*, i32, i32, i32, i8*)
 
 Linear fit: per-kernel cost drops from 5.43 µs to 1.93 µs (**2.8×**); fixed overhead drops from
 46.6 µs to 18.9 µs (**2.5×**).
+
+</details>
 
 ### Interpretation
 

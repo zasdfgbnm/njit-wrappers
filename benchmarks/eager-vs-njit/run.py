@@ -272,6 +272,26 @@ Each graph is simply `for i in range(N): x = torch.relu(x)`.
 
 > {ITERS} iterations per data point, {WARMUP} warmup iterations.
 
+## Why njit is faster per op
+
+Each `torch.relu(x)` call in **eager** mode crosses the Python/C++ boundary:
+
+1. Python attribute lookup (`torch.relu`)
+2. Python function-call frame creation
+3. pybind11 entry point + `PythonArgParser` argument parsing
+4. ATen dispatcher → kernel
+
+Inside a compiled **njit** function, after JIT compilation, each op lowers to a
+direct call to `at::_ops::relu::call()` in LLVM-compiled machine code — the
+Python interpreter is not involved per op.  The ~{k_eager - k_njit:.1f} µs/op savings
+({k_eager:.2f} → {k_njit:.2f} µs/op) is the cost of PyTorch's Python dispatch layer.
+
+The tradeoff is the ~{b_njit:.1f} µs **fixed** overhead that njit pays on every
+function entry: the Numba dispatcher + tensor unboxing (borrowing the
+`TensorImpl*` from the Python object).  Eager has negligible fixed overhead.
+The break-even point is at roughly {b_njit / (k_eager - k_njit):.0f} ops;
+beyond that njit wins.
+
 ## Benchmark environment
 
 | Component | Details |

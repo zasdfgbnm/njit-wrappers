@@ -140,8 +140,10 @@ extern kernels such as GEMM). Numba is used purely for the *orchestration* layer
 
 2. **Lightweight.** The core implementation requires adding `torch.Tensor` and Triton kernel
    objects as first-class types in Numba's type system. This is a well-defined extension point
-   in Numba's architecture. It does not require a new compiler, a new IR, or changes to Triton
-   internals.
+   in Numba's architecture. It does not require a new compiler or a new IR. Triton internals are
+   not changed in the prototype, though upstreaming first-class Triton support into Numba (i.e.
+   making `@njit` able to call Triton kernels without wrappers) would be a valuable follow-on
+   contribution that benefits the broader ecosystem.
 
 3. **Composable with the existing stack.** Numba's `@njit` compiles via LLVM and can call
    arbitrary C symbols. ATen operators are already exposed as stable C++ symbols in

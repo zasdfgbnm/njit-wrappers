@@ -38,8 +38,8 @@ loops — host-side dispatch latency determines end-to-end model throughput. Tor
 already supports CUDA Graphs (`reduce-overhead` mode) to address this, but CUDA Graphs impose
 hard constraints: static shapes, no host-side computation, no dynamic control flow, no graph
 breaks. Real models hit these limits frequently, so CUDA Graphs cannot be enabled
-unconditionally. We need an approach that reduces host latency just as effectively but is safe
-to turn on for any model without modification.
+unconditionally. We need an approach that reduces host latency with broader coverage —
+applicable to any model regardless of shapes, control flow, or custom ops.
 
 ---
 

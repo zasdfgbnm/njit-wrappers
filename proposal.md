@@ -133,22 +133,31 @@ to the outer Python wrapper), plus Numba's existing extension mechanisms to teac
 lower each construct to LLVM IR. The relevant mechanisms are:
 
 **`numba.core.types.Type` + `@typeof_impl`.**
-Defines a new first-class type in Numba's type system and tells Numba how to recognise a Python
-object at the JIT boundary. Used to register `torch.Tensor` (as a pointer to `TensorImpl`) and
-Triton kernel objects (as a pointer to a compiled cubin handle) so they can be passed directly
-into `@njit` functions without boxing.
+Numba's type system is open: any Python class can be given a first-class compiled
+representation by subclassing `numba.core.types.Type` and decorating a recogniser function
+with `@typeof_impl`. When a value of that class crosses the JIT boundary, Numba maps it to the
+declared type instead of treating it as an opaque Python object. This is the mechanism that
+makes `torch.Tensor` directly passable into `@njit` functions: `TensorType` declares that a
+tensor is represented as a raw `TensorImpl*` pointer (`i64` in LLVM IR), and `@typeof_impl`
+tells Numba to recognise any `torch.Tensor` instance as that type. The same mechanism works for
+Triton kernel objects, representing each compiled kernel as a pointer to its `CUfunction` handle.
 
 **`@overload`.**
-Provides a Numba-compilable implementation for a Python callable. Numba replaces the call site
-with the compiled version during type inference. Used to implement `torch.empty_strided` (maps
-to a direct ATen C ABI call), `torch.cuda.set_device` (maps to `cudaSetDevice`), and
-`get_cuda_stream` (maps to `cudaGetStream`).
+`@numba.extending.overload(fn)` registers a Numba-compilable implementation for the Python
+callable `fn`. During type inference, whenever Numba sees a call to `fn` inside a `@njit`
+function, it substitutes the registered implementation and compiles it — the original Python
+callable is never invoked at runtime. This is how PyTorch runtime functions such as
+`torch.empty_strided`, `torch.cuda.set_device`, and `get_cuda_stream` acquire compiled
+equivalents: each `@overload` maps the Python call to a direct C ABI call into ATen or CUDA,
+with no Python interpreter involvement in the hot path.
 
 **`@intrinsic`.**
-Emits LLVM IR directly for an operation, giving full control over the generated code. Used
-where the lowering cannot be expressed in Python — for example, spilling tensor arguments onto
-the stack to build the `void*` array that `cuLaunchKernelEx` expects, or calling an ATen symbol
-whose signature does not map cleanly to a Python-level `@overload`.
+`@numba.extending.intrinsic` lets an extension emit LLVM IR directly, bypassing Numba's
+normal Python-to-IR translation. It is used for operations whose lowering cannot be expressed
+as Python — for instance, allocating a stack slot to hold an `at::Tensor` value for an
+Itanium-ABI `sret` return, or building the `void*` argument array that `cuLaunchKernelEx`
+expects. Every ATen operator call and every Triton kernel launch ultimately bottoms out in an
+`@intrinsic` that emits the exact IR sequence needed to call the underlying C or CUDA symbol.
 
 **What this is NOT:** We are not using Numba to generate GPU kernels. All GPU computation
 continues to be produced by Triton (for element-wise and reduction ops) and ATen/cuBLAS (for

@@ -93,9 +93,7 @@ approximately **65%** of the per-kernel Python dispatch cost — reducing it fro
 1.9 µs** per kernel (see the
 [inductor-vs-njit benchmark](benchmarks/inductor-vs-njit/README.md)).
 
-To make this work, `call` needs a minor refactor (drop `del` statements, replace the
-`with _DeviceGuard:` syntax with a direct `torch.cuda.set_device` call, and move `args.clear()`
-to the outer Python wrapper), plus Numba's existing extension mechanisms to teach it how to
+To make this work, `call` needs a minor refactor, plus Numba's existing extension mechanisms to teach it how to
 lower each construct to LLVM IR. The relevant mechanisms are:
 
 **`numba.core.types.Type` + `@typeof_impl`.**

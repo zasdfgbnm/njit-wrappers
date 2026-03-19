@@ -107,11 +107,11 @@ def call(args):
 Every time this function is called, CPython pays a cascade of overhead costs:
 
 - **Frame allocation.** A new Python stack frame is pushed and torn down on each call.
-- **Buffer allocation via `empty_strided_cuda`.** Each call constructs Python tuples for shape
+- **Buffer allocation via `empty_strided`.** Each call constructs Python tuples for shape
   and stride, resolves keyword arguments, and crosses the Python/C++ boundary into ATen.
-- **Grid computation.** `grid(1024)` is a Python function call that computes
+- **Grid computation.** `grid(19)` is a Python function call that computes
   `ceil(n / BLOCK_SIZE)`; the result is boxed as a Python integer.
-- **Triton's Python launcher.** `triton_poi_fused_add_relu_0.run(...)` enters
+- **Triton's Python launcher.** `triton_poi_fused_add_lift_fresh_0.run(...)` enters
   [`JITFunction.__call__`](https://github.com/triton-lang/triton/blob/main/python/triton/runtime/jit.py),
   which inspects argument types and shapes, selects a specialization, builds a `void*` parameter
   array in Python, and finally crosses into a `ctypes`-wrapped C function to call

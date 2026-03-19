@@ -124,34 +124,31 @@ all four categories of overhead listed above: no Python stack frame is pushed, n
 tuples are constructed for shape and stride, no boxed-integer grid result is produced, and the
 Triton `JITFunction.__call__` path is bypassed entirely. Together these components account for
 approximately **65%** of the per-kernel Python dispatch cost — reducing it from **5.4 µs to
-1.9 µs** per kernel (see
-[`benchmarks/call-overhead-breakdown`](benchmarks/call-overhead-breakdown/README.md) for the
-per-component breakdown and methodology).
+1.9 µs** per kernel (see the
+[inductor-vs-njit benchmark](benchmarks/inductor-vs-njit/README.md)).
 
-To make this work, the generated `Runner` class needs to be refactored so that `call` is
-`@njit`-compatible. There are two directions.
+To make this work, `call` needs a minor refactor (drop `del` statements, replace the
+`with _DeviceGuard:` syntax with a direct `torch.cuda.set_device` call, and move `args.clear()`
+to the outer Python wrapper), plus Numba's existing extension mechanisms to teach it how to
+lower each construct to LLVM IR. The relevant mechanisms are:
 
-**Direction 1 — move unsupported constructs out of `call`.**
-Several things in the current generated code are invisible to Numba's type inference: the
-`with torch.cuda._DeviceGuard(0):` context manager (a Python object with `__enter__`/`__exit__`
-methods), `args.clear()` on a plain Python list, and any assertion or `del` statement. These
-constructs do not need to live inside `call` — the device guard can be set once in `__call__`
-on the `Runner` object before forwarding to the compiled function, list clearing can move to a
-thin Python wrapper, and assertions can be hoisted to an outer validation step. The inner
-`call` that Numba sees then contains only tensor operations, buffer allocations, grid
-computations, and kernel launches.
+**`numba.core.types.Type` + `@typeof_impl`.**
+Defines a new first-class type in Numba's type system and tells Numba how to recognise a Python
+object at the JIT boundary. Used to register `torch.Tensor` (as a pointer to `TensorImpl`) and
+Triton kernel objects (as a pointer to a compiled cubin handle) so they can be passed directly
+into `@njit` functions without boxing.
 
-**Direction 2 — teach Numba to lower the constructs it encounters.**
-For the parts that *do* belong in the hot path — tensor creation, kernel launch, stream
-passing — Numba provides a well-defined extension protocol: a `numba.core.types.Type` subclass
-describes the type, a `@typeof_impl` registration tells Numba how to type a Python value at
-the call boundary, a `@type_callable` or `@overload` registration provides the type-inference
-rule for each operation, and a `lower_builtin` / `@intrinsic` registration produces the
-corresponding LLVM IR. This is precisely how `torch.Tensor` is registered in this prototype
-(see `src/njit_wrappers/_tensor.py`) and how Triton kernel objects are registered (see
-`src/njit_wrappers/_triton.py`). The same mechanism covers `torch.empty_strided` (lowers to a
-direct ATen C ABI call), `get_cuda_stream` (lowers to `cudaGetStream`), and the grid tuple
-(lowers to a stack-allocated pair of `i64`).
+**`@overload`.**
+Provides a Numba-compilable implementation for a Python callable. Numba replaces the call site
+with the compiled version during type inference. Used to implement `torch.empty_strided` (maps
+to a direct ATen C ABI call), `torch.cuda.set_device` (maps to `cudaSetDevice`), and
+`get_cuda_stream` (maps to `cudaGetStream`).
+
+**`@intrinsic`.**
+Emits LLVM IR directly for an operation, giving full control over the generated code. Used
+where the lowering cannot be expressed in Python — for example, spilling tensor arguments onto
+the stack to build the `void*` array that `cuLaunchKernelEx` expects, or calling an ATen symbol
+whose signature does not map cleanly to a Python-level `@overload`.
 
 **What this is NOT:** We are not using Numba to generate GPU kernels. All GPU computation
 continues to be produced by Triton (for element-wise and reduction ops) and ATen/cuBLAS (for

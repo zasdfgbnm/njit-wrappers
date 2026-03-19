@@ -85,7 +85,7 @@ Every time this function is called, CPython pays a cascade of overhead costs:
 
 None of this work is intrinsic to dispatching a GPU kernel. It is interpreter bookkeeping.
 
-We propose to apply `@numba.njit` directly to the generated `call` function. Doing so eliminates
+We propose to apply `@numba.njit` directly to the generated `call` function when `enable_numba=True`. Doing so eliminates
 all four categories of overhead listed above: no Python stack frame is pushed, no Python-level
 tuples are constructed for shape and stride, no boxed-integer grid result is produced, and the
 Triton `JITFunction.__call__` path is bypassed entirely. Together these components account for

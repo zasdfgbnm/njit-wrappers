@@ -33,47 +33,13 @@ When set to `True`, TorchInductor's generated orchestration code is compiled wit
 
 ## Motivation
 
-### Host latency is a first-class bottleneck in modern LLM inference
-
-As GPU hardware has become increasingly powerful, the CPU-side orchestration of kernel launches
-has emerged as a significant — and growing — bottleneck in large language model inference.
-
-**Decoding is fundamentally serial.** Each autoregressive step requires a full forward pass
-before the next token can begin. For a model that takes 400 µs of wall time per step but spends
-50 µs of that in Python dispatching kernels, eliminating that overhead is a 14% latency reduction
-with zero algorithmic change.
-
-**Speculative decoding amplifies the problem.** Speculative decoding pairs a small draft model
-with a large target model, running the draft model in a tight loop to propose multiple tokens per
-step. The [MLCEngine team reports](https://blog.mlc.ai/2024/10/10/optimizing-and-characterizing-high-throughput-low-latency-llm-inference)
-that "LLM engine overhead reduction becomes *extremely* important in speculative decoding
-scenarios, as the draft model runs in a tight loop and can take a strong hit from engine
-overhead." Host overhead that is tolerable in single-model inference becomes the critical path
-when a second model runs many times per target-model call. This is corroborated by vLLM's
-[speculative decoding analysis](https://blog.vllm.ai/2024/10/17/spec-decode.html) and
-Snowflake's [Arctic Inference work](https://www.snowflake.com/en/engineering-blog/fast-speculative-decoding-vllm-arctic/),
-both of which identify host-side coordination overhead as a key factor limiting speculative
-decoding efficiency.
-
-**The existing mitigation — CUDA Graphs — has significant limitations.** PyTorch's
-`reduce-overhead` mode and `max-autotune` both use CUDA Graphs to bypass per-kernel Python
-dispatch. CUDA Graphs can deliver [up to 10% latency reduction in multi-GPU inference](https://blog.mlc.ai/2024/10/10/optimizing-and-characterizing-high-throughput-low-latency-llm-inference),
-but they impose hard constraints: static shapes, no dynamic control flow, no CPU ops in the
-captured graph, and no graph breaks. In practice, real models with dynamic batch sizes,
-conditional logic, or custom ops frequently cannot be captured into a single CUDA Graph — as
-documented in the [PyTorch CUDAGraph Trees docs](https://docs.pytorch.org/docs/stable/torch.compiler_cudagraph_trees.html)
-and analyzed in depth by [F. Kong (2025)](https://fkong.tech/posts/2025-12-23-cuda-graph-in-torch-compile/).
-When a graph break occurs, the entire mechanism degrades silently to the slow Python path.
-
-**Inference-time scaling makes latency more, not less, critical.** The emerging paradigm of
-inference-time compute scaling — chain-of-thought, tree search, multi-step reasoning — multiplies
-the number of forward passes per user request. As [Raschka (2025)](https://magazine.sebastianraschka.com/p/state-of-llms-2025)
-notes, latency that was acceptable for a single pass becomes unacceptable when the runtime is
-chain-of-thought steps × per-step latency.
-
-In short: host-side dispatch latency is not an edge case. It is on the critical path for the
-inference workloads that matter most today, and it will become more important as models grow more
-complex.
+When the GPU is underutilized — small batch sizes, decode phases, speculative decoding draft
+loops — host-side dispatch latency determines end-to-end model throughput. TorchInductor
+already supports CUDA Graphs (`reduce-overhead` mode) to address this, but CUDA Graphs impose
+hard constraints: static shapes, no host-side computation, no dynamic control flow, no graph
+breaks. Real models hit these limits frequently, so CUDA Graphs cannot be enabled
+unconditionally. We need an approach that reduces host latency just as effectively but is safe
+to turn on for any model without modification.
 
 ---
 

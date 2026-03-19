@@ -142,7 +142,7 @@ extern kernels such as GEMM). Numba is used purely for the *orchestration* layer
    objects as first-class types in Numba's type system. This is a well-defined extension point
    in Numba's architecture. It does not require a new compiler or a new IR. Triton kernel
    launching can be supported without any changes to Triton internals, though upstreaming
-   first-class Triton support into Numba would be a valuable contribution that benefits the
+   first-class Numba support into Triton would be a valuable contribution that benefits the
    broader ecosystem.
 
 3. **Composable with the existing stack.** Numba's `@njit` compiles via LLVM and can call

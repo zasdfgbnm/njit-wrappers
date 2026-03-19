@@ -95,6 +95,42 @@ Each benchmark simply calls `add_kernel` N times.
 
 > 1000 iterations per data point, 50 warmup iterations.
 
+## Why njit is faster per launch
+
+Each `add_kernel[(grid,)](x, y, out, n, BLOCK_SIZE=BLOCK_SIZE)` call in
+**eager** Python runs through Triton's full Python launch path:
+
+1. `JITFunction.__call__` → `run()` — Python method dispatch
+2. Specialization key computation — Python-level divisibility checks on every
+   pointer and integer argument to select the right pre-compiled variant
+3. Cache lookup — a Python `dict` lookup on the specialization key
+4. Grid lambda invocation — calling a Python lambda to compute the grid tuple
+5. Argument packing — assembling a Python list of raw pointers and scalars
+6. `CompiledKernel.launch()` — another Python method call
+7. pybind11 entry point into C
+8. `cuLaunchKernelEx` — the actual CUDA driver call
+
+Inside a compiled **njit** function, steps 1–7 are eliminated.  The generated
+`@njit` launcher is LLVM-compiled machine code that:
+
+1. Extracts device pointers from `torch.Tensor` objects (one integer load each)
+2. Computes the specialization bitmask with integer arithmetic
+3. Indexes into a NumPy array to fetch the right `CUfunction` handle
+4. Calls the C trampoline — a thin shim generated once at import time — which
+   calls `cuLaunchKernelEx` directly via `dlsym`
+
+The Python interpreter is not involved per launch.  The ~11 µs/launch savings
+(13.98 → 2.94 µs/launch) reflects the cost of Triton's Python dispatch layer.
+This is a much larger speedup than in the `eager-vs-njit` benchmark (~3 µs/op
+saved for PyTorch ops), because Triton's Python launcher does substantially
+more work per call than PyTorch's thin pybind11 entry point.
+
+The tradeoff is the ~6.1 µs **fixed** overhead on every njit function entry:
+the Numba dispatcher + tensor unboxing.  This matches the fixed overhead seen
+in the `eager-vs-njit` benchmark (~6.3 µs) and is paid once regardless of how
+many kernels are launched inside the function.  The break-even point is at
+roughly 1 launch; beyond that njit wins.
+
 ## Benchmark environment
 
 | Component | Details |

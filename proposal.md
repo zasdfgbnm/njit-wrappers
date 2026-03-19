@@ -133,31 +133,33 @@ to the outer Python wrapper), plus Numba's existing extension mechanisms to teac
 lower each construct to LLVM IR. The relevant mechanisms are:
 
 **`numba.core.types.Type` + `@typeof_impl`.**
-Numba's type system is open: any Python class can be given a first-class compiled
-representation by subclassing `numba.core.types.Type` and decorating a recogniser function
-with `@typeof_impl`. When a value of that class crosses the JIT boundary, Numba maps it to the
-declared type instead of treating it as an opaque Python object. This is the mechanism that
-makes `torch.Tensor` directly passable into `@njit` functions: `TensorType` declares that a
-tensor is represented as a raw `TensorImpl*` pointer (`i64` in LLVM IR), and `@typeof_impl`
-tells Numba to recognise any `torch.Tensor` instance as that type. The same mechanism works for
-Triton kernel objects, representing each compiled kernel as a pointer to its `CUfunction` handle.
+Numba's type system is open to extension. A third-party library can introduce a new compiled
+type by subclassing `numba.core.types.Type` and registering a recogniser with `@typeof_impl`.
+When a Python object of the corresponding class is passed into a `@njit` function, Numba maps
+it to that type — with a chosen machine representation (e.g. a raw pointer stored as `i64`)
+— rather than refusing to compile or treating the object as opaque. This makes it possible to
+expose arbitrary C/C++ objects that have a Python wrapper (such as tensors or compiled GPU
+kernel handles) as first-class values inside JIT-compiled code.
 
 **`@overload`.**
-`@numba.extending.overload(fn)` registers a Numba-compilable implementation for the Python
-callable `fn`. During type inference, whenever Numba sees a call to `fn` inside a `@njit`
-function, it substitutes the registered implementation and compiles it — the original Python
-callable is never invoked at runtime. This is how PyTorch runtime functions such as
-`torch.empty_strided`, `torch.cuda.set_device`, and `get_cuda_stream` acquire compiled
-equivalents: each `@overload` maps the Python call to a direct C ABI call into ATen or CUDA,
-with no Python interpreter involvement in the hot path.
+`@numba.extending.overload(fn)` teaches Numba how to compile a call to an existing Python
+function `fn` that Numba would otherwise not know how to lower. The decorator is given a
+factory function that, for a particular combination of argument types, returns a pure-Python
+implementation that Numba can compile. At the call site inside a `@njit` function, Numba
+selects the matching overload during type inference and compiles it in place; the original
+Python callable is never invoked at runtime. This allows Python-facing library APIs — whose
+real work is done in C/C++ — to be given thin compiled implementations that call the
+underlying C symbols directly.
 
 **`@intrinsic`.**
-`@numba.extending.intrinsic` lets an extension emit LLVM IR directly, bypassing Numba's
-normal Python-to-IR translation. It is used for operations whose lowering cannot be expressed
-as Python — for instance, allocating a stack slot to hold an `at::Tensor` value for an
-Itanium-ABI `sret` return, or building the `void*` argument array that `cuLaunchKernelEx`
-expects. Every ATen operator call and every Triton kernel launch ultimately bottoms out in an
-`@intrinsic` that emits the exact IR sequence needed to call the underlying C or CUDA symbol.
+`@numba.extending.intrinsic` is an escape hatch that lets an extension author write the
+lowering of an operation directly as LLVM IR. It is needed when the correct machine code
+cannot be expressed in terms of Python operations that Numba already knows how to compile —
+for example, when the target C function uses a calling convention (such as `sret` for
+C++ value returns, or a `void**` parameter array as in CUDA launch APIs) that has no natural
+Python-level analogue. An `@intrinsic` receives the LLVM `IRBuilder` directly and can emit
+arbitrary instructions, making it possible to call any C or CUDA symbol regardless of its
+ABI.
 
 **What this is NOT:** We are not using Numba to generate GPU kernels. All GPU computation
 continues to be produced by Triton (for element-wise and reduction ops) and ATen/cuBLAS (for

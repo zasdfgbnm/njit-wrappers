@@ -98,6 +98,49 @@ Each graph is a chain of `torch.softmax` calls with alternating dims
 
 > 1000 iterations per data point, 50 warmup iterations.
 
+## Why njit is faster
+
+There are two independent sources of savings, matching the two model
+parameters *k* and *b*.
+
+### Per-kernel cost: 1.93 vs 5.43 µs/kernel
+
+When `torch.compile` runs the inductor-generated Python wrapper, each
+Triton kernel launch crosses the Python/C boundary multiple times:
+
+1. Python grid lambda is evaluated (`lambda meta: (triton.cdiv(xnumel, meta['XBLOCK']),)`)
+2. `CachingAutotuner.__call__` is invoked — a Python method that looks up
+   the best config and packages arguments
+3. The Python-side launcher calls into the Triton C extension to fire
+   `cuLaunchKernelEx`
+
+Inside a compiled **njit** function, this entire chain is replaced by
+LLVM-compiled machine code.  The grid is a compile-time integer constant
+(computed once during `NjitInductorGraph.__init__`), and each kernel fires
+through a lightweight C trampoline (`_generate_launch_trampoline_src`) that
+calls `cuLaunchKernelEx` directly — no Python frames, no argument-parsing,
+no autotuner lookup.  The ~3.5 µs/kernel savings (5.43 → 1.93 µs/kernel)
+is the cost of Python's per-launch interpreter overhead.
+
+### Fixed overhead: 18.87 vs 46.55 µs
+
+Every `torch.compile` call pays a fixed Python cost before the first
+kernel even launches: the dynamo/inductor graph wrapper must check guards
+(shape guards, device guards, etc.) in Python, unpack the argument tuple,
+and resolve the cached compiled artifact.  This accounts for the ~46.6 µs
+baseline.
+
+The njit wrapper's ~18.9 µs baseline comes from the Numba dispatcher
+(one C-level function call) plus tensor unboxing — extracting the
+`TensorImpl*` from each PyTorch tensor argument so it can be passed as
+a raw pointer into compiled code.
+
+### Break-even
+
+The njit wrapper wins immediately: even at 1 kernel (14.7 µs vs 37.4 µs)
+the lower fixed cost more than compensates for any overhead.  The gap
+widens linearly with graph size at ~3.5 µs per additional kernel.
+
 ## Benchmark environment
 
 | Component | Details |

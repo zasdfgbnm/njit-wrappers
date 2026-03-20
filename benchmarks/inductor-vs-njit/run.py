@@ -283,6 +283,50 @@ Each graph is a chain of `torch.softmax` calls with alternating dims
 
 > {ITERS} iterations per data point, {WARMUP} warmup iterations.
 
+## Why njit is faster
+
+There are two independent sources of savings, matching the two model
+parameters *k* and *b*.
+
+### Per-kernel cost: {k_njit:.2f} vs {k_compile:.2f} µs/kernel
+
+When `torch.compile` runs the inductor-generated Python wrapper, each
+Triton kernel launch crosses the Python/C boundary multiple times:
+
+1. Python grid lambda is evaluated for the grid dimensions
+2. `CachingAutotuner.__call__` is invoked — a Python method that looks up
+   the best config and packages arguments
+3. The Python-side launcher calls into the Triton C extension to fire
+   `cuLaunchKernelEx`
+
+Inside a compiled **njit** function, this entire chain is replaced by
+LLVM-compiled machine code.  The grid is a compile-time integer constant
+(computed once during `NjitInductorGraph.__init__`), and each kernel fires
+through a lightweight C trampoline (`_generate_launch_trampoline_src`) that
+calls `cuLaunchKernelEx` directly — no Python frames, no argument-parsing,
+no autotuner lookup.  The ~{k_compile - k_njit:.1f} µs/kernel savings
+({k_compile:.2f} → {k_njit:.2f} µs/kernel) is the cost of Python's
+per-launch interpreter overhead.
+
+### Fixed overhead: {b_njit:.2f} vs {b_compile:.2f} µs
+
+Every `torch.compile` call pays a fixed Python cost before the first
+kernel even launches: the dynamo/inductor graph wrapper must check guards
+(shape guards, device guards, etc.) in Python, unpack the argument tuple,
+and resolve the cached compiled artifact.  This accounts for the
+~{b_compile:.1f} µs baseline.
+
+The njit wrapper's ~{b_njit:.1f} µs baseline comes from the Numba dispatcher
+(one C-level function call) plus tensor unboxing — extracting the
+`TensorImpl*` from each PyTorch tensor argument so it can be passed as
+a raw pointer into compiled code.
+
+### Break-even
+
+The njit wrapper wins immediately: even at 1 kernel the lower fixed cost
+more than compensates for any overhead.  The gap widens linearly with
+graph size at ~{k_compile - k_njit:.1f} µs per additional kernel.
+
 ## Benchmark environment
 
 | Component | Details |

@@ -86,18 +86,14 @@ Every time this function is called, CPython pays a cascade of overhead costs:
   array in Python, and finally crosses into a `ctypes`-wrapped C function to call
   `cuLaunchKernelEx`. That single kernel launch traverses four to six Python frames.
 
-None of this work is intrinsic to dispatching a GPU kernel. It is interpreter bookkeeping.
+None of this work is intrinsic to dispatching a GPU kernel. It is interpreter bookkeeping. We propose to apply `@numba.njit` directly to the generated `call` function when `enable_numba=True`. Doing so eliminates
+all four categories of overhead listed above.
 
-We propose to apply `@numba.njit` directly to the generated `call` function when `enable_numba=True`. Doing so eliminates
-all four categories of overhead listed above: no Python stack frame is pushed, no Python-level
-tuples are constructed for shape and stride, no boxed-integer grid result is produced, and the
-Triton `JITFunction.__call__` path is bypassed entirely. Together these components account for
-approximately **65%** of the per-kernel Python dispatch cost — reducing it from **5.4 µs to
-1.9 µs** per kernel (see the
-[inductor-vs-njit benchmark](benchmarks/inductor-vs-njit/README.md)).
+To make this work, PyTorch needs two complementary changes: **(1)** a minor refactor of the generated `call`
+function, and **(2)** extension code that plugs into Numba's existing mechanisms so the compiler can lower each
+construct to LLVM IR.
 
-To make this work, `call` needs a minor refactor, plus Numba's existing extension mechanisms to teach it how to
-lower each construct to LLVM IR. The relevant mechanisms are:
+The relevant mechanisms are:
 
 **`numba.core.types.Type` + `@typeof_impl`.**
 Numba's type system is open to extension. A third-party library can introduce a new compiled

@@ -13,13 +13,16 @@ with `numba.njit` reduces host-side dispatch latency by **2–5× without changi
 The compiled kernels, the operator semantics, and the overall graph structure are identical to
 what Inductor produces today — we only `@njit` the orchestration layer that drives them.
 
-The prototype lives at [zasdfgbnm/njit-wrappers](https://github.com/zasdfgbnm/njit-wrappers).
-End-to-end benchmark ([source](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit)):
-a chain of `torch.softmax` calls where Inductor generates one Triton kernel per softmax;
-host-side dispatch latency measured without `cudaDeviceSynchronize`.
-The `@njit` orchestration is **2.8× faster** than `torch.compile` at this task, as shown in the following figure.
+We implemented this idea in the open-source prototype
+[zasdfgbnm/njit-wrappers](https://github.com/zasdfgbnm/njit-wrappers). To stress host-side
+orchestration rather than kernel time, we benchmark a chain of `torch.softmax` calls (Inductor
+emits one Triton kernel per softmax) and report host-side dispatch latency **without**
+`cudaDeviceSynchronize`, following the setup in
+[benchmarks/inductor-vs-njit](https://github.com/zasdfgbnm/njit-wrappers/tree/main/benchmarks/inductor-vs-njit).
+Under these conditions, `@njit` orchestration is **2.8× faster** than `torch.compile`, as
+illustrated below.
 
-![Inductor vs njit orchestration overhead](https://raw.githubusercontent.com/zasdfgbnm/njit-wrappers/main/benchmarks/inductor-vs-njit/overhead_vs_kernels.png)
+![Inductor vs njit orchestration overhead](./benchmarks/inductor-vs-njit/overhead_vs_kernels.png)
 
 We propose making Numba an optional dependency and adding a new flag to `torch.compile`:
 

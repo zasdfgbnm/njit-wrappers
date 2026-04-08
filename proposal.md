@@ -124,10 +124,12 @@ Python-level analogue. An `@intrinsic` receives the LLVM `IRBuilder` directly an
 arbitrary instructions, making it possible to call any C or CUDA symbol regardless of its
 ABI.
 
-**What this is NOT:** We are not using Numba to generate GPU kernels. All GPU computation
-continues to be produced by Triton (for element-wise and reduction ops) and ATen/cuBLAS (for
-extern kernels such as GEMM). Numba is used purely for the *orchestration* layer — the host-side
-`call(args)` function that drives the GPU.
+### What this is NOT
+
+We are not using Numba to generate GPU kernels. All GPU computation continues to be produced
+by Triton (for element-wise and reduction ops) and ATen/cuBLAS (for extern kernels such as
+GEMM). Numba is used purely for the *orchestration* layer — the host-side `call(args)` function
+that drives the GPU.
 
 ### Why `numba.njit` rather than, say, C++?
 

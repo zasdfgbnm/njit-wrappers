@@ -53,7 +53,7 @@ applicable to any model regardless of shapes, control flow, or custom ops.
 TorchInductor's compilation pipeline
 ([`torch/_inductor/codegen/wrapper.py`](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/codegen/wrapper.py))
 generates a Python source file for each compiled model. The heart of that file is a `call(args)`
-function — the orchestration runner — that executes on every forward pass. The following is taken
+function — the orchestration runner — that executes on every forward pass. The following example `call(args)` function is taken
 directly from the
 [TorchInductor C++ Wrapper Tutorial](https://docs.pytorch.org/tutorials/unstable/inductor_cpp_wrapper_tutorial.html)
 in the official PyTorch documentation:

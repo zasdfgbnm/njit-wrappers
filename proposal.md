@@ -24,7 +24,7 @@ illustrated below.
 
 ![Inductor vs njit orchestration overhead](./benchmarks/inductor-vs-njit/overhead_vs_kernels.png)
 
-We propose making Numba an optional dependency and adding a new flag to `torch.compile`:
+We propose making Numba an optional dependency of PyTorch and adding a new flag to `torch.compile`:
 
 ```python
 torch.compile(model, enable_numba=True)

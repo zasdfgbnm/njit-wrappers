@@ -675,16 +675,6 @@ output = compiled(input)
    Triton maintainers early. If a stable API is not feasible, the off-tree fallback is
    functional.
 
-3. **Refcount management for intermediate tensors.** In the current prototype, tensors
-   created inside a `@numba.njit` function and not returned to Python have their `TensorImpl`
-   refcount incremented but never decremented — a memory leak for long-running programs. The
-   fix (explicit free calls at the end of the njit function) is known and straightforward to
-   implement, but should be addressed before Phase 3.
-
-4. **Non-CUDA devices.** The current prototype is CUDA-only. CPU support would require
-   replacing `cuLaunchKernelEx` trampolines with the equivalent C++ dispatch for Inductor's CPU
-   codegen. This is left for a later phase.
-
 ---
 
 ## Summary

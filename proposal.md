@@ -616,8 +616,7 @@ TBD with maintainers).
 with zero Python overhead.
 
 **Approach:** Generate a thin C trampoline per kernel signature that calls `cuLaunchKernelEx`
-directly. The trampoline is compiled at `torch.compile` time (when the Triton kernel is
-finalized) and its address is passed into the njit function as an integer constant.
+directly. The trampoline is compiled and its address is passed into the njit function as an integer constant.
 
 **Triton coordination:** We plan to open a discussion with the Triton maintainers about the
 cleanest integration point:
@@ -638,17 +637,19 @@ Triton. The Numba wrapper lives in PyTorch alongside Module 1 in the same shared
 **Goal:** When `enable_numba=True`, TorchInductor's generated graph runner is a `@numba.njit`
 function rather than plain Python.
 
-**Approach:** After the existing inductor compilation pipeline produces a Python runner, a
-post-processing pass:
-1. Parses the runner source into a lightweight IR (buffer allocations, kernel launches, extern
-   kernels, return values). This parsing is already implemented in the prototype (~500 lines).
-2. Emits a `@numba.njit` function that performs the same operations using Modules 1 and 2.
-3. Compiles the function (one-time cost at `torch.compile` time).
+**Approach:** When `enable_numba=True`, Inductor should emit the graph runner directly in a
+Numba-compatible subset of Python from its existing code generation path:
+1. Generate the same runner logic as today (buffer allocations, kernel launches, extern kernels,
+   and return values), but in a form that is valid inside `@numba.njit`.
+2. Express cross-library calls through Modules 1 and 2 rather than through ordinary Python glue.
+3. Compile the generated function once at `torch.compile` time.
 
-**Required refactors in Inductor:** The runner's generated Python must be structured in a way
-the parser can consume reliably. We expect this to require modest, non-invasive changes to
-Inductor's code generation — no new IR nodes, no changes to kernel compilation, no changes to
-the Triton backend. The overall code complexity of Inductor should not increase materially.
+**Required refactors in Inductor:** Teach the runner code generator to produce this
+Numba-compatible form directly. The prototype used a lightweight IR only as a workaround because
+it could not modify Inductor's generated code; the proposal does **not** require introducing a
+new IR layer. We expect modest, non-invasive changes to Inductor's code generation only: no new IR
+nodes, no changes to kernel compilation, and no changes to the Triton backend. The overall code
+complexity of Inductor should not increase materially.
 
 **API surface:**
 
@@ -659,8 +660,6 @@ compiled = torch.compile(model, enable_numba=True)
 # Everything else is unchanged
 output = compiled(input)
 ```
-
-**Upstream home:** `torch/_inductor/codegen/numba_runner.py` or equivalent.
 
 ---
 

@@ -663,54 +663,6 @@ output = compiled(input)
 
 ---
 
-### Phased rollout
-
-We believe strongly in the principle of *close the loop before expanding coverage*. The
-development sequence reflects this:
-
-#### Phase 0: Internal prototyping (current state)
-
-The `njit-wrappers` repository demonstrates the full stack on a single benchmark model. All
-three modules are implemented at prototype quality. The only correctness guarantee is that the
-unit tests pass.
-
-#### Phase 1: One op, end-to-end, in-tree
-
-Upstream a minimal but complete version of Module 1 (one op), Module 2 (one kernel signature),
-and Module 3 (the runner wrapper) into PyTorch behind a feature flag. The end-to-end compilation
-path works for any model that uses only the one supported op. This establishes the architecture
-and CI infrastructure.
-
-Success criterion: `torch.compile(model, enable_numba=True)` produces correct results for a
-one-op model, all existing tests pass, and the compilation path is exercised in CI.
-
-#### Phase 2: Alpha (internal use only)
-
-Expand op coverage in Module 1 to cover the ops most commonly needed by both Inductor-generated
-transformer runners and user-authored eager PyTorch orchestration (attention, GEMM, activation
-functions, layer norm, etc.). Expand Module 2 to cover all Triton calling conventions Inductor
-generates. Fix correctness bugs as they surface. No public announcement. The only advertised
-requirement is that unit tests pass.
-
-#### Phase 3: Early adopter preview (opt-in, known sharp edges)
-
-Announce the flag to users who are willing to accept potential bugs and are prepared to own
-their own correctness validation. Document known limitations clearly. Collect real-world models
-from early adopters to drive edge-case coverage. Users at this stage should expect bugs and
-are responsible for verifying their own outputs.
-
-Success criterion: The flag works correctly for the 10 most common Hugging Face transformer
-models in inference mode.
-
-#### Phase 4: General availability
-
-Resolve all known correctness issues. Expand op coverage to match the practical op surface needed
-by both Inductor runners and direct `@numba.njit` use on eager PyTorch code. Handle common edge
-cases (dynamic shapes in the model graph, graph breaks, non-CUDA devices). Announce to the
-general PyTorch community.
-
----
-
 ## Open Questions
 
 1. **Numba as a dependency.** Numba is a mature, well-maintained package (MIT license, active

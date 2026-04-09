@@ -583,7 +583,9 @@ the loop first, then expand coverage*.
 ### Module 1: `torch.Tensor` as a Numba type
 
 **Goal:** Make `torch.Tensor` a first-class value inside `@numba.njit` code, so Numba-compiled
-host code can manipulate real PyTorch tensors and call torch operators directly.
+host code can pass around real PyTorch tensors and call torch operators directly. The goal is **not**
+NumPy-style support where Numba lowers tensor element access and generates CPU/GPU kernels for the
+body of the `@numba.njit` function.
 
 This module should be framed as **PyTorch-wide tensor/Numba interop**.
 Concretely, it removes one of the current limitations of `@numba.njit`: `torch.Tensor` becomes a

@@ -2,8 +2,9 @@
 
 Importing this module registers torch.Tensor as a Numba type so that
 @numba.njit functions can accept and return tensors.  Operations inside
-the compiled function lower **directly** to ATen functions with no extra
-wrapper call at runtime.
+the compiled function lower **directly** to ATen redispatch functions,
+bypassing the full PyTorch dispatcher and jumping straight to the CUDA
+kernel.  No extra wrapper call at runtime.
 
 How symbol resolution works
 ---------------------------
@@ -14,20 +15,25 @@ set of types), then look up the address via ctypes and register it with
 LLVM.  No hard-coded mangled strings in the source, no C++ address-getter
 helper functions.
 
-Example for ``at::relu(const at::Tensor&)``:
+We use ``at::_ops::{name}::redispatch`` instead of ``::call`` to skip
+the dispatcher.  The first argument is a ``c10::DispatchKeySet`` (uint64)
+that tells the dispatcher which backend to jump to directly.
+
+Example for ``at::_ops::relu::redispatch(c10::DispatchKeySet, const at::Tensor&)``:
 
     _mangle_aten("relu", _ARGS_UNARY)
-    → "_ZN2at4reluERKNS_6TensorE"
+    → "_ZN2at4_ops4relu10redispatchEN3c1014DispatchKeySetERKNS_6TensorE"
 
-ATen calling conventions (SysV x86-64, all ops return at::Tensor via sret)
+ATen calling conventions (aarch64 AAPCS64 / SysV x86-64, all ops return
+at::Tensor via sret, all take DispatchKeySet as first non-sret arg)
 ---------------------------------------------------------------------------
-  UNARY      void(Tensor* sret, const Tensor& self)
-  BINARY     void(Tensor* sret, const Tensor& self, const Tensor& other)
-  ALPHA      void(Tensor* sret, const Tensor& self, const Tensor& other,
-                  const Scalar& alpha)          ← add, sub
-  REDUCTION  void(Tensor* sret, const Tensor& self,
-                  optional<ScalarType> dtype)   ← i16 by value (trivially
-                                                  copyable 2-byte struct)
+  UNARY      void(Tensor* sret, uint64 keyset, const Tensor& self)
+  BINARY     void(Tensor* sret, uint64 keyset, const Tensor& self,
+                  const Tensor& other)
+  ALPHA      void(Tensor* sret, uint64 keyset, const Tensor& self,
+                  const Tensor& other, const Scalar& alpha)
+  REDUCTION  void(Tensor* sret, uint64 keyset, const Tensor& self,
+                  optional<ScalarType> dtype)   ← i16 by value
 
 Tensor representation inside compiled functions
 -----------------------------------------------
@@ -95,21 +101,26 @@ llvm.add_symbol("njit_data_ptr", _fn_addr(_bridge_lib, "njit_data_ptr"))
 # ---------------------------------------------------------------------------
 # ATen symbol resolution via Itanium C++ name mangling computed in Python.
 #
-# We call at::_ops::{name}::call, which is always exported from
-# libtorch_cpu.so (unlike at::{name}, which is an inline wrapper).
+# We call at::_ops::{name}::redispatch, which takes a c10::DispatchKeySet
+# (uint64_t) as the first argument and skips dispatch layers above the
+# target backend.  We pass DispatchKeySet(CUDA) = 0x10002 to jump straight
+# to the CUDA kernel, bypassing autograd, autocast, and other middleware.
 #
-# Mangled name pattern for at::_ops::{op}::call({args}):
+# Mangled name pattern for at::_ops::{op}::redispatch(DispatchKeySet, {args}):
 #
-#   _ZN  2at  4_ops  {len(op)}{op}  4call  E  {arg_suffix}
+#   _ZN  2at  4_ops  {len(op)}{op}  10redispatch  E  {arg_suffix}
 #
-# Substitution context after encoding "N 2at 4_ops {n}{op} 4call E":
+# Substitution context after encoding "N 2at 4_ops {n}{op} 10redispatch E":
 #   S_  = at::
 #   S0_ = at::_ops
 #   S1_ = at::_ops::{op}   (the generated struct)
+# After encoding c10::DispatchKeySet (N3c1014DispatchKeySetE):
+#   S2_ = c10::
+#   S3_ = c10::DispatchKeySet
 # After encoding the first "const at::Tensor &" (RKNS_6TensorE):
-#   S2_ = at::Tensor
-#   S3_ = const at::Tensor
-#   S4_ = const at::Tensor&   ← used as S4_ for second Tensor arg
+#   S4_ = at::Tensor
+#   S5_ = const at::Tensor
+#   S6_ = const at::Tensor&   ← used as S6_ for second Tensor arg
 #
 # For reduction ops the second argument is std::optional<c10::ScalarType>
 # (c10::optional = std::optional via using-declaration in modern PyTorch).
@@ -120,23 +131,27 @@ llvm.add_symbol("njit_data_ptr", _fn_addr(_bridge_lib, "njit_data_ptr"))
 
 _TORCH_LIB = ctypes.CDLL(str(Path(torch.__file__).parent / "lib" / "libtorch_cpu.so"))
 
-# Argument suffix constants (substitutions as annotated above)
-_ARGS_UNARY = "RKNS_6TensorE"  # (const Tensor&)
-_ARGS_BINARY = "RKNS_6TensorES4_"  # (Tensor&, Tensor&)
-_ARGS_ALPHA = "RKNS_6TensorES4_RKN3c106ScalarE"  # (Tensor&, Tensor&, Scalar&)
-_ARGS_REDUCE = (  # (Tensor&, optional<ScalarType>)
-    "RKNS_6TensorESt8optionalIN3c1010ScalarTypeEE"
+# DispatchKeySet(CUDA) = Dense | CUDA backend = 0x10002
+_CUDA_DISPATCH_KEYSET = 0x10002
+
+# Argument suffix constants for redispatch (substitutions as annotated above).
+# The DispatchKeySet first arg shifts all substitution indices by +2 vs ::call.
+_ARGS_UNARY = "N3c1014DispatchKeySetERKNS_6TensorE"
+_ARGS_BINARY = "N3c1014DispatchKeySetERKNS_6TensorES6_"
+_ARGS_ALPHA = "N3c1014DispatchKeySetERKNS_6TensorES6_RKNS2_6ScalarE"
+_ARGS_REDUCE = (
+    "N3c1014DispatchKeySetERKNS_6TensorESt8optionalINS2_10ScalarTypeEE"
 )
 
 
 def _mangle_aten(op: str, arg_suffix: str) -> str:
-    """Compute the Itanium mangled name for at::_ops::{op}::call(...)."""
-    return f"_ZN2at4_ops{len(op)}{op}4callE{arg_suffix}"
+    """Compute the Itanium mangled name for at::_ops::{op}::redispatch(...)."""
+    return f"_ZN2at4_ops{len(op)}{op}10redispatchE{arg_suffix}"
 
 
 # (op_name in at::_ops, arg_suffix, llvm_sym, calling_convention)
 _ATEN_OPS: list[tuple[str, str, str, str]] = [
-    # UNARY:     void(sret Tensor*, const Tensor&)
+    # UNARY:     void(sret Tensor*, i64 keyset, const Tensor&)
     ("neg", _ARGS_UNARY, "_aten_neg", "unary"),
     ("abs", _ARGS_UNARY, "_aten_abs", "unary"),
     ("exp", _ARGS_UNARY, "_aten_exp", "unary"),
@@ -149,13 +164,13 @@ _ATEN_OPS: list[tuple[str, str, str, str]] = [
     ("sigmoid", _ARGS_UNARY, "_aten_sigmoid", "unary"),
     ("tanh", _ARGS_UNARY, "_aten_tanh", "unary"),
     ("silu", _ARGS_UNARY, "_aten_silu", "unary"),
-    # REDUCTION: void(sret Tensor*, const Tensor&, i16 optional<ScalarType>)
+    # REDUCTION: void(sret Tensor*, i64 keyset, const Tensor&, i16 optional<ScalarType>)
     ("sum", _ARGS_REDUCE, "_aten_sum", "reduction"),
     ("mean", _ARGS_REDUCE, "_aten_mean", "reduction"),
-    # ALPHA:     void(sret Tensor*, const Tensor&, const Tensor&, const Scalar&)
+    # ALPHA:     void(sret Tensor*, i64 keyset, const Tensor&, const Tensor&, const Scalar&)
     ("add_Tensor", _ARGS_ALPHA, "_aten_add", "alpha"),
     ("sub_Tensor", _ARGS_ALPHA, "_aten_sub", "alpha"),
-    # BINARY:    void(sret Tensor*, const Tensor&, const Tensor&)
+    # BINARY:    void(sret Tensor*, i64 keyset, const Tensor&, const Tensor&)
     ("mul_Tensor", _ARGS_BINARY, "_aten_mul", "binary"),
     ("div_Tensor", _ARGS_BINARY, "_aten_div", "binary"),
     ("matmul", _ARGS_BINARY, "_aten_matmul", "binary"),
@@ -302,7 +317,7 @@ def _alpha_scalar_one(builder):
 
 
 def _make_unary_intrinsic(sym: str):
-    """Direct call: void _aten_op(sret Tensor*, const Tensor& self)."""
+    """Redispatch: void _aten_op(sret Tensor*, i64 keyset, const Tensor& self)."""
 
     @intrinsic
     def _op(typingctx, a):
@@ -316,12 +331,17 @@ def _make_unary_intrinsic(sym: str):
             out = builder.alloca(i64)
             fn = cgutils.get_or_insert_function(
                 builder.module,
-                ir.FunctionType(ir.VoidType(), [i8p, i8p]),
+                ir.FunctionType(ir.VoidType(), [i8p, i64, i8p]),
                 sym,
             )
             fn.args[0].add_attribute("sret")
             builder.call(
-                fn, [builder.bitcast(out, i8p), _tensor_slot(builder, args[0])]
+                fn,
+                [
+                    builder.bitcast(out, i8p),
+                    ir.Constant(i64, _CUDA_DISPATCH_KEYSET),
+                    _tensor_slot(builder, args[0]),
+                ],
             )
             return builder.load(out)
 
@@ -331,7 +351,7 @@ def _make_unary_intrinsic(sym: str):
 
 
 def _make_binary_intrinsic(sym: str):
-    """Direct call: void _aten_op(sret Tensor*, const Tensor&, const Tensor&)."""
+    """Redispatch: void _aten_op(sret Tensor*, i64 keyset, Tensor&, Tensor&)."""
 
     @intrinsic
     def _op(typingctx, a, b):
@@ -345,7 +365,7 @@ def _make_binary_intrinsic(sym: str):
             out = builder.alloca(i64)
             fn = cgutils.get_or_insert_function(
                 builder.module,
-                ir.FunctionType(ir.VoidType(), [i8p, i8p, i8p]),
+                ir.FunctionType(ir.VoidType(), [i8p, i64, i8p, i8p]),
                 sym,
             )
             fn.args[0].add_attribute("sret")
@@ -353,6 +373,7 @@ def _make_binary_intrinsic(sym: str):
                 fn,
                 [
                     builder.bitcast(out, i8p),
+                    ir.Constant(i64, _CUDA_DISPATCH_KEYSET),
                     _tensor_slot(builder, args[0]),
                     _tensor_slot(builder, args[1]),
                 ],
@@ -365,7 +386,7 @@ def _make_binary_intrinsic(sym: str):
 
 
 def _make_alpha_intrinsic(sym: str):
-    """Direct call: void _aten_op(sret Tensor*, Tensor&, Tensor&, Scalar& alpha=1)."""
+    """Redispatch: void _aten_op(sret Tensor*, i64 keyset, Tensor&, Tensor&, Scalar&)."""
 
     @intrinsic
     def _op(typingctx, a, b):
@@ -379,7 +400,7 @@ def _make_alpha_intrinsic(sym: str):
             out = builder.alloca(i64)
             fn = cgutils.get_or_insert_function(
                 builder.module,
-                ir.FunctionType(ir.VoidType(), [i8p, i8p, i8p, i8p]),
+                ir.FunctionType(ir.VoidType(), [i8p, i64, i8p, i8p, i8p]),
                 sym,
             )
             fn.args[0].add_attribute("sret")
@@ -387,6 +408,7 @@ def _make_alpha_intrinsic(sym: str):
                 fn,
                 [
                     builder.bitcast(out, i8p),
+                    ir.Constant(i64, _CUDA_DISPATCH_KEYSET),
                     _tensor_slot(builder, args[0]),
                     _tensor_slot(builder, args[1]),
                     _alpha_scalar_one(builder),
@@ -400,7 +422,7 @@ def _make_alpha_intrinsic(sym: str):
 
 
 def _make_reduction_intrinsic(sym: str):
-    """Direct call: void _aten_op(sret Tensor*, Tensor&, i16 dtype=nullopt).
+    """Redispatch: void _aten_op(sret Tensor*, i64 keyset, Tensor&, i16 dtype).
 
     c10::optional<ScalarType> is 2 bytes, trivially copyable, so SysV ABI
     passes it by value as i16.  We pass 0x0000 (engaged=false = nullopt).
@@ -419,7 +441,7 @@ def _make_reduction_intrinsic(sym: str):
             out = builder.alloca(i64)
             fn = cgutils.get_or_insert_function(
                 builder.module,
-                ir.FunctionType(ir.VoidType(), [i8p, i8p, i16]),
+                ir.FunctionType(ir.VoidType(), [i8p, i64, i8p, i16]),
                 sym,
             )
             fn.args[0].add_attribute("sret")
@@ -427,6 +449,7 @@ def _make_reduction_intrinsic(sym: str):
                 fn,
                 [
                     builder.bitcast(out, i8p),
+                    ir.Constant(i64, _CUDA_DISPATCH_KEYSET),
                     _tensor_slot(builder, args[0]),
                     ir.Constant(i16, 0),  # nullopt: engaged byte = 0
                 ],
